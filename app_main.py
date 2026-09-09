@@ -12,7 +12,7 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 
 app = FastAPI(
     title="CEMIG OCR API - Diagnóstico Vercel",
-    version="0.49.0",
+    version="1.1.0-RC1",
     description="Diagnóstico incremental do runtime Vercel sem carregar OCR no startup.",
 )
 
@@ -306,3 +306,18 @@ def diagnostico_liberar_modelos():
         "ocr_fast": False,
         "ocr_robusto": False,
     }
+
+from fastapi import Request
+
+@app.post("/webhook/survey123")
+async def survey123_webhook(request: Request):
+    body = await request.json()
+    return {
+        "ok": True,
+        "versao": "1.1.0-RC1",
+        "mensagem": "Webhook recebido com sucesso.",
+        "method": request.method,
+        "headers": dict(request.headers),
+        "payload": body
+    }
+

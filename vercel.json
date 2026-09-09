@@ -1,12 +1,15 @@
 {
-  "$schema": "https://openapi.vercel.sh/vercel.json",
-  "functions": {
-    "api/index.py": {
-      "maxDuration": 300,
-      "excludeFiles": "{.venv/**,__pycache__/**,test_*.py,tests/**,debug/**,*.zip,*.jpg,*.jpeg,*.png,*.pdf}"
+  "services": {
+    "api": {
+      "root": "./",
+      "runtime": "container",
+      "entrypoint": "Dockerfile.vercel"
     }
   },
-  "regions": [
-    "gru1"
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": { "service": "api" }
+    }
   ]
 }

@@ -12,7 +12,7 @@ from fastapi import FastAPI
 
 app = FastAPI(
     title="CEMIG OCR API - Diagnóstico Vercel",
-    version="0.47.0",
+    version="0.48.0",
     description="Diagnóstico incremental do runtime Vercel sem carregar OCR no startup.",
 )
 
@@ -47,7 +47,7 @@ def erro_payload(etapa: str, exc: Exception, inicio: float):
 def raiz():
     return {
         "status": "ok",
-        "versao": "0.47.0",
+        "versao": "0.48.0",
         "mensagem": "FastAPI iniciou sem carregar Paddle/PaddleOCR.",
     }
 
@@ -56,11 +56,32 @@ def raiz():
 def health():
     return {
         "status": "ok",
-        "versao": "0.47.0",
+        "versao": "0.48.0",
         "ocr_fast_carregado": OCR_FAST is not None,
         "ocr_robusto_carregado": OCR_ROBUSTO is not None,
         "ambiente": ambiente(),
     }
+
+
+
+@app.get("/diagnostico/00-import-cv2")
+def diagnostico_import_cv2():
+    inicio = time.perf_counter()
+    print("[DIAG 00] Antes de import cv2", flush=True)
+    try:
+        import cv2
+        print("[DIAG 00] import cv2 OK", flush=True)
+        return {
+            "ok": True,
+            "etapa": "import_cv2",
+            "cv2_version": getattr(cv2, "__version__", None),
+            "cv2_arquivo": getattr(cv2, "__file__", None),
+            "tempo_s": round(time.perf_counter() - inicio, 4),
+            "ambiente": ambiente(),
+        }
+    except Exception as exc:
+        print(f"[DIAG 00] ERRO: {type(exc).__name__}: {exc}", flush=True)
+        return erro_payload("import_cv2", exc, inicio)
 
 
 @app.get("/diagnostico/01-import-paddle")

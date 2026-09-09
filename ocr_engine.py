@@ -18,8 +18,8 @@ def find_input_file():
         "conta_001.jpeg ou conta_001.png."
     )
 
-OUTPUT_DIR = BASE_DIR / "output"
-OUTPUT_DIR.mkdir(exist_ok=True)
+OUTPUT_DIR = Path(tempfile.gettempdir()) / "cemig_ocr_output"
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ----------------------------------------------------------------------

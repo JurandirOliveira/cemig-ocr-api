@@ -335,8 +335,36 @@ async def webhook_options():
     return Response(status_code=204)
 @app.post('/webhook/survey123')
 async def webhook(request: Request):
+    print('='*80)
+    print('WEBHOOK SURVEY123 RECEBIDO')
+    print('='*80)
+    print('METHOD:', request.method)
+    print('URL:', request.url)
+    print('
+HEADERS')
+    print('-'*80)
+    for k,v in request.headers.items():
+        print(f'{k}: {v}')
+    body=await request.body()
+    print('
+BODY BRUTO')
+    print('-'*80)
     try:
-        payload=await request.json()
+        print(body.decode('utf-8'))
     except Exception:
+        print(body)
+    try:
+        payload=json.loads(body)
+        print('
+JSON FORMATADO')
+        print('-'*80)
+        print(json.dumps(payload,indent=2,ensure_ascii=False))
+    except Exception as ex:
+        print('
+ERRO AO INTERPRETAR JSON')
+        print(ex)
         payload={}
-    return {'status':'ok','versao':'1.0.0-RC2','payload':payload}
+    print('='*80)
+    print('FIM WEBHOOK')
+    print('='*80)
+    return {'status':'ok','versao':'1.1.0-RC2.1'}

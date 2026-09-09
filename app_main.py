@@ -321,3 +321,22 @@ async def survey123_webhook(request: Request):
         "payload": body
     }
 
+
+
+# ===== RC2 Survey123 scaffold =====
+from fastapi import Request, Response
+try:
+    from fastapi.middleware.cors import CORSMiddleware
+    app.add_middleware(CORSMiddleware,allow_origins=['*'],allow_credentials=False,allow_methods=['*'],allow_headers=['*'])
+except Exception:
+    pass
+@app.options('/webhook/survey123')
+async def webhook_options():
+    return Response(status_code=204)
+@app.post('/webhook/survey123')
+async def webhook(request: Request):
+    try:
+        payload=await request.json()
+    except Exception:
+        payload={}
+    return {'status':'ok','versao':'1.0.0-RC2','payload':payload}

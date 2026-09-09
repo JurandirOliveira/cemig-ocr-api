@@ -12,7 +12,7 @@ from fastapi import FastAPI
 
 app = FastAPI(
     title="CEMIG OCR API - Diagnóstico Vercel",
-    version="0.45.0",
+    version="0.46.0",
     description="Diagnóstico incremental do runtime Vercel sem carregar OCR no startup.",
 )
 
@@ -47,7 +47,7 @@ def erro_payload(etapa: str, exc: Exception, inicio: float):
 def raiz():
     return {
         "status": "ok",
-        "versao": "0.45.0",
+        "versao": "0.46.0",
         "mensagem": "FastAPI iniciou sem carregar Paddle/PaddleOCR.",
     }
 
@@ -56,7 +56,7 @@ def raiz():
 def health():
     return {
         "status": "ok",
-        "versao": "0.45.0",
+        "versao": "0.46.0",
         "ocr_fast_carregado": OCR_FAST is not None,
         "ocr_robusto_carregado": OCR_ROBUSTO is not None,
         "ambiente": ambiente(),

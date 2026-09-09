@@ -1,0 +1,12 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "functions": {
+    "api/index.py": {
+      "maxDuration": 300,
+      "excludeFiles": "{.venv/**,__pycache__/**,test_*.py,tests/**,debug/**,*.zip,*.jpg,*.jpeg,*.png,*.pdf}"
+    }
+  },
+  "regions": [
+    "gru1"
+  ]
+}

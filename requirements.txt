@@ -1,4 +1,5 @@
 paddlepaddle==3.3.1
+opencv-contrib-python-headless==4.10.0.84
 ./vendor/opencv_contrib_python-4.10.0.84-py3-none-any.whl
 paddleocr==3.7.0
 paddlex[ocr-core]==3.7.2

@@ -119,6 +119,143 @@ def find_reference_near_top(texts):
     return None
 
 
+def _parse_consumo_kwh_numero(texto: str):
+    """
+    Extrai um valor de consumo em kWh de um fragmento de texto OCR.
+
+    Retorna número (int quando possível) ou None. Evita confundir consumo
+    com valores monetários, datas, CEP, linha digitável ou unidades/instalações.
+    """
+    if not texto:
+        return None
+
+    original = str(texto)
+    upper = original.upper()
+
+    # Não tratar valores monetários/códigos como consumo.
+    if "R$" in upper:
+        return None
+    if re.search(r"\d{2}/\d{2}/\d{4}", original):
+        return None
+    if re.search(r"\d{5}-\d{3}", original):
+        return None
+    if re.search(r"\d{11}-\d", original):
+        return None
+
+    # Preferimos números inteiros ou decimais simples; consumo normalmente
+    # aparece como quantidade, não como moeda 1.234,56.
+    candidatos = []
+    for m in re.finditer(r"(?<![\d.,-])(\d{1,6})(?:[.,](\d{1,3}))?(?![\d.,-])", original):
+        inteiro = m.group(1)
+        decimal = m.group(2)
+
+        # Evita anos comuns e identificadores longos quando aparecem isolados.
+        try:
+            inteiro_int = int(inteiro)
+        except Exception:
+            continue
+
+        if decimal and len(decimal) == 2 and "KWH" not in upper and "KW/H" not in upper:
+            # Dois decimais longe de kWh provavelmente são moeda.
+            continue
+        if 1900 <= inteiro_int <= 2100:
+            continue
+
+        if decimal:
+            try:
+                valor = float(f"{inteiro}.{decimal}")
+            except Exception:
+                continue
+        else:
+            valor = float(inteiro_int)
+
+        # Faixa ampla, mas evita zeros absurdos/códigos.
+        if 0 <= valor <= 200000:
+            candidatos.append((m.start(), valor))
+
+    if not candidatos:
+        return None
+
+    # Se existir kWh no texto, preferir número mais próximo depois do kWh.
+    kwh_match = re.search(r"K\s*W\s*/?\s*H|KWH", upper)
+    if kwh_match:
+        depois = [c for c in candidatos if c[0] >= kwh_match.end()]
+        if depois:
+            valor = depois[0][1]
+        else:
+            valor = min(candidatos, key=lambda c: abs(c[0] - kwh_match.start()))[1]
+    else:
+        valor = candidatos[0][1]
+
+    return int(valor) if abs(valor - int(valor)) < 0.0001 else valor
+
+
+def find_consumo_kwh(texts, boxes=None):
+    """
+    Extrai o campo 'Consumo kWh' quando disponível.
+
+    Estratégia conservadora:
+    1. procura rótulos explícitos 'Consumo kWh' / 'kWh';
+    2. captura a quantidade na mesma linha ou nas próximas linhas OCR;
+    3. ignora histórico, valores monetários e identificadores;
+    4. retorna None quando não houver evidência forte.
+    """
+    if not texts:
+        return None
+
+    def is_noise_context(t: str) -> bool:
+        u = str(t).upper()
+        return any(token in u for token in (
+            "HISTÓRICO", "HISTORICO", "BANDEIRA", "TARIFA",
+            "VALOR", "VENCIMENTO", "REFERÊNCIA", "REFERENCIA",
+            "LINHA DIGIT", "CÓDIGO", "CODIGO", "INSTALAÇÃO",
+            "UNIDADE CONSUMIDORA", "CEP", "CNPJ", "CPF",
+        )) and not ("CONSUMO" in u and ("KWH" in u or "KW/H" in u))
+
+    # Caso forte: texto contém simultaneamente CONSUMO e KWH.
+    for i, text in enumerate(texts):
+        upper = str(text).upper()
+        if "CONSUM" in upper and ("KWH" in upper or "KW/H" in upper or re.search(r"K\s*W\s*/?\s*H", upper)):
+            valor = _parse_consumo_kwh_numero(text)
+            if valor is not None:
+                return valor
+            for j in range(i + 1, min(i + 8, len(texts))):
+                if is_noise_context(texts[j]):
+                    continue
+                valor = _parse_consumo_kwh_numero(texts[j])
+                if valor is not None:
+                    return valor
+
+    # Caso tabela: rótulo CONSUMO próximo de KWH separado em outro fragmento.
+    for i, text in enumerate(texts):
+        upper = str(text).upper()
+        if "CONSUM" not in upper:
+            continue
+        janela = " ".join(str(t).upper() for t in texts[i:min(i + 6, len(texts))])
+        if not ("KWH" in janela or "KW/H" in janela or re.search(r"K\s*W\s*/?\s*H", janela)):
+            continue
+        for j in range(i, min(i + 10, len(texts))):
+            if is_noise_context(texts[j]):
+                continue
+            valor = _parse_consumo_kwh_numero(texts[j])
+            if valor is not None:
+                return valor
+
+    # Caso linha de item: 'Energia Elétrica kWh <quantidade> ...'
+    for i, text in enumerate(texts):
+        upper = str(text).upper()
+        if ("KWH" in upper or "KW/H" in upper or re.search(r"K\s*W\s*/?\s*H", upper)) and "ENERG" in upper:
+            valor = _parse_consumo_kwh_numero(text)
+            if valor is not None:
+                return valor
+            for j in range(i + 1, min(i + 5, len(texts))):
+                valor = _parse_consumo_kwh_numero(texts[j])
+                if valor is not None:
+                    return valor
+
+    return None
+
+
 def parse_installation(texts):
     for i, t in enumerate(texts):
         u = t.upper()
@@ -771,6 +908,7 @@ def extract_fields(texts, boxes=None):
         "referencia": find_reference_near_top(texts),
         "vencimento": find_date_after_anchor(texts, "Vencimento", max_distance=8),
         "valor": valor,
+        "consumoKWh": find_consumo_kwh(texts, boxes),
         "impostoRetidoIRPJ": find_imposto_retido_irpj(texts, boxes),
         "valorValidado": valor_validado,
         "linhaDigitavel": linha_digitavel,

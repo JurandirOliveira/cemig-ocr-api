@@ -1,3 +1,10 @@
+
+## 1.0.0-RC6
+
+- Adiciona extração de `consumoKWh` na API OCR.
+- Envia `consumo_kwh` para a Feature Layer quando o campo existir.
+- Mantém endpoints e fluxo Survey123 existentes.
+
 # Changelog
 
 ## 1.0.0-RC5

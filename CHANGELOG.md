@@ -1,4 +1,1 @@
-# v1.1.0-RC1
-
-- Added /webhook/survey123 endpoint.
-- Preserved /ocr/conta-cemig.
+v1.0.0-RC3 - Webhook Survey123 baixa anexo e executa OCR; sem update da Feature Layer.

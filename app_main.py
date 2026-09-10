@@ -7,6 +7,9 @@ import sys
 import tempfile
 import time
 import traceback
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
@@ -14,8 +17,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(
     title="CEMIG OCR API - Diagnóstico Vercel",
-    version="1.0.0-RC2-diagnostic",
-    description="Diagnóstico incremental do runtime Vercel sem carregar OCR no startup.",
+    version="1.0.0-RC3",
+    description="CEMIG OCR API com integração Survey123: download de anexo e OCR automático.",
 )
 
 app.add_middleware(
@@ -57,7 +60,7 @@ def erro_payload(etapa: str, exc: Exception, inicio: float):
 def raiz():
     return {
         "status": "ok",
-        "versao": "0.49.0",
+        "versao": "1.0.0-RC3",
         "mensagem": "FastAPI iniciou sem carregar Paddle/PaddleOCR.",
     }
 
@@ -66,7 +69,7 @@ def raiz():
 def health():
     return {
         "status": "ok",
-        "versao": "0.49.0",
+        "versao": "1.0.0-RC3",
         "ocr_fast_carregado": OCR_FAST is not None,
         "ocr_robusto_carregado": OCR_ROBUSTO is not None,
         "ambiente": ambiente(),
@@ -128,7 +131,7 @@ async def ocr_conta_cemig(arquivo: UploadFile = File(...)):
 
         return {
             "sucesso": True,
-            "versao": "0.49.0",
+            "versao": "1.0.0-RC3",
             "arquivo": nome,
             "roteamento": roteamento,
             "resultado": resultado,
@@ -318,8 +321,8 @@ def diagnostico_liberar_modelos():
     }
 
 
+
 def _json_preview(valor, limite=600):
-    """Retorna uma versão curta e segura de um valor para logs/resposta."""
     try:
         texto = json.dumps(valor, ensure_ascii=False, default=str)
     except Exception:
@@ -329,8 +332,23 @@ def _json_preview(valor, limite=600):
     return texto
 
 
+def _mascarar_tokens(obj):
+    """Remove tokens/sigilos antes de imprimir logs."""
+    if isinstance(obj, dict):
+        novo = {}
+        for k, v in obj.items():
+            kl = str(k).lower()
+            if "token" in kl or "signature" in kl or kl in {"authorization", "cookie"}:
+                novo[k] = "***REMOVIDO***"
+            else:
+                novo[k] = _mascarar_tokens(v)
+        return novo
+    if isinstance(obj, list):
+        return [_mascarar_tokens(i) for i in obj]
+    return obj
+
+
 def _buscar_chaves(obj, chaves_alvo, caminho="$", encontrados=None):
-    """Busca recursivamente chaves no payload do Survey123, sem assumir formato fixo."""
     if encontrados is None:
         encontrados = []
     chaves_norm = {c.lower() for c in chaves_alvo}
@@ -339,11 +357,7 @@ def _buscar_chaves(obj, chaves_alvo, caminho="$", encontrados=None):
         for chave, valor in obj.items():
             novo_caminho = f"{caminho}.{chave}"
             if str(chave).lower() in chaves_norm:
-                encontrados.append({
-                    "path": novo_caminho,
-                    "key": chave,
-                    "value": valor,
-                })
+                encontrados.append({"path": novo_caminho, "key": chave, "value": valor})
             _buscar_chaves(valor, chaves_alvo, novo_caminho, encontrados)
     elif isinstance(obj, list):
         for i, item in enumerate(obj):
@@ -361,13 +375,12 @@ def _diagnosticar_payload_survey123(payload):
         "objectId": ["objectId", "objectid", "OBJECTID", "objectID"],
         "globalId": ["globalId", "globalid", "GLOBALID", "globalID"],
         "featureServiceUrl": ["featureServiceUrl", "featureServiceURL", "featureserviceurl", "serviceUrl", "serviceURL", "layerUrl", "layerURL"],
-        "layerId": ["layerId", "layerid", "layerID"],
-        "attachments": ["attachments", "attachment", "attachmentInfos", "attachmentInfo", "adds", "updates"],
+        "layerId": ["layerId", "layerid", "layerID", "id"],
+        "attachments": ["attachments", "attachment", "attachmentInfos", "attachmentInfo"],
     }
 
     diagnostico = {}
     detalhes = {}
-
     for nome, chaves in buscas.items():
         encontrados = _buscar_chaves(payload, chaves)
         detalhes[nome] = [
@@ -379,8 +392,113 @@ def _diagnosticar_payload_survey123(payload):
             for item in encontrados[:20]
         ]
         diagnostico[nome] = _primeiro_valor(encontrados)
-
     return diagnostico, detalhes
+
+
+def _extrair_info_survey123(payload: dict):
+    feature = payload.get("feature") or {}
+    feature_attrs = feature.get("attributes") or {}
+    feature_result = feature.get("result") or {}
+    layer_info = feature.get("layerInfo") or {}
+    survey_info = payload.get("surveyInfo") or {}
+    portal_info = payload.get("portalInfo") or {}
+
+    object_id = (
+        feature_attrs.get("objectid")
+        or feature_attrs.get("OBJECTID")
+        or feature_result.get("objectId")
+        or feature_result.get("objectid")
+    )
+
+    if object_id is None:
+        try:
+            object_id = (payload.get("response") or [{}])[0].get("addResults", [{}])[0].get("objectId")
+        except Exception:
+            object_id = None
+
+    global_id = (
+        feature_attrs.get("globalid")
+        or feature_attrs.get("globalId")
+        or feature_result.get("globalId")
+        or feature_result.get("globalid")
+    )
+
+    service_url = survey_info.get("serviceUrl") or survey_info.get("featureServiceUrl")
+    layer_id = layer_info.get("id")
+    if layer_id is None:
+        layer_id = 0
+
+    anexos = []
+    feature_attachments = feature.get("attachments") or {}
+    if isinstance(feature_attachments, dict):
+        for campo, lista in feature_attachments.items():
+            if isinstance(lista, list):
+                for item in lista:
+                    if isinstance(item, dict):
+                        anexos.append({"campo": campo, **item})
+
+    if not anexos:
+        try:
+            adds = (payload.get("applyEdits") or [{}])[0].get("attachments", {}).get("adds", [])
+            for item in adds:
+                if isinstance(item, dict):
+                    anexos.append({"campo": item.get("keywords") or "attachment", **item})
+        except Exception:
+            pass
+
+    return {
+        "objectId": object_id,
+        "globalId": global_id,
+        "featureServiceUrl": service_url,
+        "layerId": layer_id,
+        "portalToken": portal_info.get("token"),
+        "attachments": anexos,
+    }
+
+
+def _adicionar_token_url(url: str, token: str | None):
+    if not token:
+        return url
+    partes = urllib.parse.urlsplit(url)
+    query = dict(urllib.parse.parse_qsl(partes.query, keep_blank_values=True))
+    query["token"] = token
+    nova_query = urllib.parse.urlencode(query)
+    return urllib.parse.urlunsplit((partes.scheme, partes.netloc, partes.path, nova_query, partes.fragment))
+
+
+def _baixar_anexo_survey123(anexo: dict, token: str | None) -> Path:
+    url = anexo.get("url")
+    nome = anexo.get("name") or f"attachment_{anexo.get('id', 'arquivo')}.jpg"
+    sufixo = Path(nome).suffix.lower() or ".jpg"
+    if sufixo not in FORMATOS_SUPORTADOS:
+        # Para o OCR atual, preservamos os formatos já homologados.
+        raise HTTPException(status_code=415, detail=f"Formato do anexo não suportado: {sufixo}")
+    if not url:
+        raise HTTPException(status_code=400, detail="Anexo sem URL no payload do Survey123.")
+
+    url_download = _adicionar_token_url(url, token)
+    fd, nome_tmp = tempfile.mkstemp(prefix="survey123_anexo_", suffix=sufixo, dir="/tmp")
+    os.close(fd)
+    caminho = Path(nome_tmp)
+
+    req = urllib.request.Request(url_download, headers={"User-Agent": "cemig-ocr-api/1.0.0-RC3"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            dados = resp.read(MAX_UPLOAD_BYTES + 1)
+    except urllib.error.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Erro HTTP ao baixar anexo ArcGIS: {exc.code}")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Erro ao baixar anexo ArcGIS: {type(exc).__name__}: {exc}")
+
+    if len(dados) > MAX_UPLOAD_BYTES:
+        caminho.unlink(missing_ok=True)
+        raise HTTPException(status_code=413, detail="Anexo excede o limite de 4 MB desta API.")
+    if not dados:
+        caminho.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail="Anexo baixado vazio.")
+
+    caminho.write_bytes(dados)
+    return caminho
 
 
 @app.options("/webhook/survey123")
@@ -404,64 +522,117 @@ async def survey123_webhook(request: Request):
     try:
         payload = json.loads(body_text) if body_text else {}
         json_ok = True
-        json_erro = None
     except Exception as exc:
         payload = {}
         json_ok = False
-        json_erro = f"{type(exc).__name__}: {exc}"
+        raise HTTPException(status_code=400, detail=f"Payload não é JSON válido: {type(exc).__name__}: {exc}")
 
     diagnostico, detalhes = _diagnosticar_payload_survey123(payload)
+    info = _extrair_info_survey123(payload)
+    anexos = info.get("attachments") or []
 
     print("", flush=True)
     print("=" * 90, flush=True)
-    print("WEBHOOK SURVEY123 RECEBIDO", flush=True)
+    print("WEBHOOK SURVEY123 RC3 RECEBIDO", flush=True)
     print("=" * 90, flush=True)
     print(f"METHOD: {request.method}", flush=True)
     print(f"URL: {request.url}", flush=True)
     print(f"CLIENT: {request.client.host if request.client else None}", flush=True)
     print(f"BODY_BYTES: {len(body)}", flush=True)
     print(f"JSON_OK: {json_ok}", flush=True)
-    if json_erro:
-        print(f"JSON_ERRO: {json_erro}", flush=True)
+    print(f"OBJECTID: {info.get('objectId')}", flush=True)
+    print(f"GLOBALID: {info.get('globalId')}", flush=True)
+    print(f"FEATURE_SERVICE_URL: {info.get('featureServiceUrl')}", flush=True)
+    print(f"LAYER_ID: {info.get('layerId')}", flush=True)
+    print("ATTACHMENTS:", flush=True)
+    print(json.dumps(_mascarar_tokens(anexos), indent=2, ensure_ascii=False, default=str), flush=True)
+    print("CAMINHOS ENCONTRADOS:", flush=True)
+    print(json.dumps(_mascarar_tokens(detalhes), indent=2, ensure_ascii=False, default=str), flush=True)
 
-    print("-" * 90, flush=True)
-    print("HEADERS", flush=True)
-    print(json.dumps(dict(request.headers), indent=2, ensure_ascii=False, default=str), flush=True)
+    if not anexos:
+        print("ERRO: Nenhum anexo encontrado no payload.", flush=True)
+        raise HTTPException(status_code=400, detail="Nenhum anexo encontrado no payload do Survey123.")
 
-    print("-" * 90, flush=True)
-    print("DIAGNOSTICO CAMPOS-CHAVE", flush=True)
-    print(json.dumps(diagnostico, indent=2, ensure_ascii=False, default=str), flush=True)
-
-    print("-" * 90, flush=True)
-    print("CAMINHOS ENCONTRADOS", flush=True)
-    print(json.dumps(detalhes, indent=2, ensure_ascii=False, default=str), flush=True)
-
-    print("-" * 90, flush=True)
-    print("BODY BRUTO", flush=True)
-    print(body_text, flush=True)
-
-    if json_ok:
+    anexo = anexos[0]
+    caminho = None
+    try:
         print("-" * 90, flush=True)
-        print("JSON FORMATADO", flush=True)
-        print(json.dumps(payload, indent=2, ensure_ascii=False, default=str), flush=True)
+        print("BAIXANDO ANEXO", flush=True)
+        print(json.dumps(_mascarar_tokens(anexo), indent=2, ensure_ascii=False, default=str), flush=True)
+        caminho = _baixar_anexo_survey123(anexo, info.get("portalToken"))
+        tamanho = caminho.stat().st_size
+        print(f"ANEXO_BAIXADO: {caminho} ({tamanho} bytes)", flush=True)
 
-    print("=" * 90, flush=True)
-    print("FIM WEBHOOK SURVEY123", flush=True)
-    print("=" * 90, flush=True)
-    print("", flush=True)
+        inicio_ocr = time.perf_counter()
+        motor, roteamento = _obter_motor_para_documento(caminho)
+        from ocr_engine import process_document
+        resultado, tempos = process_document(caminho, motor, save_debug=False)
+        tempo_ocr_total = round(time.perf_counter() - inicio_ocr, 4)
 
-    return {
-        "status": "ok",
-        "versao": "1.0.0-RC2-diagnostic",
-        "mensagem": "Webhook Survey123 recebido com sucesso.",
-        "json_ok": json_ok,
-        "diagnostico": {
-            "objectId": _json_preview(diagnostico.get("objectId"), 300),
-            "globalId": _json_preview(diagnostico.get("globalId"), 300),
-            "featureServiceUrl": _json_preview(diagnostico.get("featureServiceUrl"), 300),
-            "layerId": _json_preview(diagnostico.get("layerId"), 300),
-            "attachments": _json_preview(diagnostico.get("attachments"), 300),
-        },
-        "tempo_s": round(time.perf_counter() - inicio, 4),
-    }
+        resumo_resultado = {
+            "nome": resultado.get("nome"),
+            "referencia": resultado.get("referencia"),
+            "vencimento": resultado.get("vencimento"),
+            "valor": resultado.get("valor"),
+            "impostoRetidoIRPJ": resultado.get("impostoRetidoIRPJ"),
+            "valorValidado": resultado.get("valorValidado"),
+            "linhaDigitavel": resultado.get("linhaDigitavel"),
+        }
 
+        print("-" * 90, flush=True)
+        print("OCR_RESULTADO_RESUMO", flush=True)
+        print(json.dumps(resumo_resultado, indent=2, ensure_ascii=False, default=str), flush=True)
+        print("ROTEAMENTO", flush=True)
+        print(json.dumps(roteamento, indent=2, ensure_ascii=False, default=str), flush=True)
+        print("TEMPOS", flush=True)
+        print(json.dumps(tempos, indent=2, ensure_ascii=False, default=str), flush=True)
+        print("=" * 90, flush=True)
+        print("FIM WEBHOOK SURVEY123 RC3", flush=True)
+        print("=" * 90, flush=True)
+        print("", flush=True)
+
+        return {
+            "status": "ok",
+            "versao": "1.0.0-RC3",
+            "mensagem": "Anexo baixado e OCR executado com sucesso. Feature Layer ainda não foi atualizada nesta RC.",
+            "survey123": {
+                "objectId": info.get("objectId"),
+                "globalId": info.get("globalId"),
+                "featureServiceUrl": info.get("featureServiceUrl"),
+                "layerId": info.get("layerId"),
+                "attachment": {
+                    "campo": anexo.get("campo"),
+                    "id": anexo.get("id"),
+                    "name": anexo.get("name"),
+                    "size": anexo.get("size"),
+                    "contentType": anexo.get("contentType"),
+                    "globalId": anexo.get("globalId"),
+                },
+            },
+            "roteamento": roteamento,
+            "resultado": resultado,
+            "tempos": {
+                **tempos,
+                "ocr_total_webhook_s": tempo_ocr_total,
+                "pipeline_completo_s": round(time.perf_counter() - inicio, 4),
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print(f"[WEBHOOK RC3] ERRO: {type(exc).__name__}: {exc}", flush=True)
+        print(traceback.format_exc(limit=12), flush=True)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "erro_tipo": type(exc).__name__,
+                "erro": str(exc),
+                "traceback": traceback.format_exc(limit=12),
+            },
+        )
+    finally:
+        if caminho is not None:
+            try:
+                caminho.unlink(missing_ok=True)
+            except Exception:
+                pass

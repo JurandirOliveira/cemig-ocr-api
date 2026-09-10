@@ -8,12 +8,21 @@ import time
 import traceback
 from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, UploadFile, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(
     title="CEMIG OCR API - Diagnóstico Vercel",
     version="1.1.0-RC1",
     description="Diagnóstico incremental do runtime Vercel sem carregar OCR no startup.",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 OCR_FAST = None
@@ -297,7 +306,15 @@ def diagnostico_carregar_dois():
 @app.get("/diagnostico/07-liberar-modelos")
 def diagnostico_liberar_modelos():
     global OCR_FAST, OCR_ROBUSTO
-    OCR_FAST = None
+    app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+OCR_FAST = None
     OCR_ROBUSTO = None
     gc.collect()
     return {
@@ -307,64 +324,24 @@ def diagnostico_liberar_modelos():
         "ocr_robusto": False,
     }
 
-from fastapi import Request
+
+
+@app.options("/webhook/survey123")
+async def webhook_options():
+    return Response(status_code=204)
 
 @app.post("/webhook/survey123")
 async def survey123_webhook(request: Request):
-    body = await request.json()
-    return {
-        "ok": True,
-        "versao": "1.1.0-RC1",
-        "mensagem": "Webhook recebido com sucesso.",
-        "method": request.method,
-        "headers": dict(request.headers),
-        "payload": body
-    }
-
-
-
-# ===== RC2 Survey123 scaffold =====
-from fastapi import Request, Response
-try:
-    from fastapi.middleware.cors import CORSMiddleware
-    app.add_middleware(CORSMiddleware,allow_origins=['*'],allow_credentials=False,allow_methods=['*'],allow_headers=['*'])
-except Exception:
-    pass
-@app.options('/webhook/survey123')
-async def webhook_options():
-    return Response(status_code=204)
-@app.post('/webhook/survey123')
-async def webhook(request: Request):
-    print('='*80)
-    print('WEBHOOK SURVEY123 RECEBIDO')
-    print('='*80)
-    print('METHOD:', request.method)
-    print('URL:', request.url)
-    print('
-HEADERS')
-    print('-'*80)
-    for k,v in request.headers.items():
-        print(f'{k}: {v}')
-    body=await request.body()
-    print('
-BODY BRUTO')
-    print('-'*80)
+    import json
+    body = await request.body()
+    print("="*80, flush=True)
+    print("WEBHOOK SURVEY123 RECEBIDO", flush=True)
+    print(dict(request.headers), flush=True)
     try:
-        print(body.decode('utf-8'))
-    except Exception:
-        print(body)
-    try:
+        print(body.decode("utf-8","ignore"), flush=True)
         payload=json.loads(body)
-        print('
-JSON FORMATADO')
-        print('-'*80)
-        print(json.dumps(payload,indent=2,ensure_ascii=False))
+        print(json.dumps(payload,indent=2,ensure_ascii=False), flush=True)
     except Exception as ex:
-        print('
-ERRO AO INTERPRETAR JSON')
-        print(ex)
+        print(ex, flush=True)
         payload={}
-    print('='*80)
-    print('FIM WEBHOOK')
-    print('='*80)
-    return {'status':'ok','versao':'1.1.0-RC2.1'}
+    return {"status":"ok","versao":"1.1.0-RC2.1","payload_recebido":True}

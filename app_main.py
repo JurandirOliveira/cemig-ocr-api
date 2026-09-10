@@ -1,5 +1,6 @@
 import gc
 import importlib
+import json
 import os
 import platform
 import sys
@@ -8,12 +9,12 @@ import time
 import traceback
 from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, UploadFile, Request, Response
+from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(
     title="CEMIG OCR API - Diagnóstico Vercel",
-    version="1.1.0-RC1",
+    version="1.0.0-RC2-diagnostic",
     description="Diagnóstico incremental do runtime Vercel sem carregar OCR no startup.",
 )
 
@@ -306,15 +307,7 @@ def diagnostico_carregar_dois():
 @app.get("/diagnostico/07-liberar-modelos")
 def diagnostico_liberar_modelos():
     global OCR_FAST, OCR_ROBUSTO
-    app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-OCR_FAST = None
+    OCR_FAST = None
     OCR_ROBUSTO = None
     gc.collect()
     return {
@@ -325,23 +318,150 @@ OCR_FAST = None
     }
 
 
+def _json_preview(valor, limite=600):
+    """Retorna uma versão curta e segura de um valor para logs/resposta."""
+    try:
+        texto = json.dumps(valor, ensure_ascii=False, default=str)
+    except Exception:
+        texto = str(valor)
+    if len(texto) > limite:
+        return texto[:limite] + "... [truncado]"
+    return texto
+
+
+def _buscar_chaves(obj, chaves_alvo, caminho="$", encontrados=None):
+    """Busca recursivamente chaves no payload do Survey123, sem assumir formato fixo."""
+    if encontrados is None:
+        encontrados = []
+    chaves_norm = {c.lower() for c in chaves_alvo}
+
+    if isinstance(obj, dict):
+        for chave, valor in obj.items():
+            novo_caminho = f"{caminho}.{chave}"
+            if str(chave).lower() in chaves_norm:
+                encontrados.append({
+                    "path": novo_caminho,
+                    "key": chave,
+                    "value": valor,
+                })
+            _buscar_chaves(valor, chaves_alvo, novo_caminho, encontrados)
+    elif isinstance(obj, list):
+        for i, item in enumerate(obj):
+            _buscar_chaves(item, chaves_alvo, f"{caminho}[{i}]", encontrados)
+
+    return encontrados
+
+
+def _primeiro_valor(encontrados):
+    return encontrados[0]["value"] if encontrados else None
+
+
+def _diagnosticar_payload_survey123(payload):
+    buscas = {
+        "objectId": ["objectId", "objectid", "OBJECTID", "objectID"],
+        "globalId": ["globalId", "globalid", "GLOBALID", "globalID"],
+        "featureServiceUrl": ["featureServiceUrl", "featureServiceURL", "featureserviceurl", "serviceUrl", "serviceURL", "layerUrl", "layerURL"],
+        "layerId": ["layerId", "layerid", "layerID"],
+        "attachments": ["attachments", "attachment", "attachmentInfos", "attachmentInfo", "adds", "updates"],
+    }
+
+    diagnostico = {}
+    detalhes = {}
+
+    for nome, chaves in buscas.items():
+        encontrados = _buscar_chaves(payload, chaves)
+        detalhes[nome] = [
+            {
+                "path": item["path"],
+                "key": item["key"],
+                "value_preview": _json_preview(item["value"], 300),
+            }
+            for item in encontrados[:20]
+        ]
+        diagnostico[nome] = _primeiro_valor(encontrados)
+
+    return diagnostico, detalhes
+
 
 @app.options("/webhook/survey123")
-async def webhook_options():
-    return Response(status_code=204)
+async def webhook_survey123_options():
+    return Response(
+        status_code=200,
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+        },
+    )
+
 
 @app.post("/webhook/survey123")
 async def survey123_webhook(request: Request):
-    import json
+    inicio = time.perf_counter()
     body = await request.body()
-    print("="*80, flush=True)
-    print("WEBHOOK SURVEY123 RECEBIDO", flush=True)
-    print(dict(request.headers), flush=True)
+    body_text = body.decode("utf-8", errors="replace")
+
     try:
-        print(body.decode("utf-8","ignore"), flush=True)
-        payload=json.loads(body)
-        print(json.dumps(payload,indent=2,ensure_ascii=False), flush=True)
-    except Exception as ex:
-        print(ex, flush=True)
-        payload={}
-    return {"status":"ok","versao":"1.1.0-RC2.1","payload_recebido":True}
+        payload = json.loads(body_text) if body_text else {}
+        json_ok = True
+        json_erro = None
+    except Exception as exc:
+        payload = {}
+        json_ok = False
+        json_erro = f"{type(exc).__name__}: {exc}"
+
+    diagnostico, detalhes = _diagnosticar_payload_survey123(payload)
+
+    print("", flush=True)
+    print("=" * 90, flush=True)
+    print("WEBHOOK SURVEY123 RECEBIDO", flush=True)
+    print("=" * 90, flush=True)
+    print(f"METHOD: {request.method}", flush=True)
+    print(f"URL: {request.url}", flush=True)
+    print(f"CLIENT: {request.client.host if request.client else None}", flush=True)
+    print(f"BODY_BYTES: {len(body)}", flush=True)
+    print(f"JSON_OK: {json_ok}", flush=True)
+    if json_erro:
+        print(f"JSON_ERRO: {json_erro}", flush=True)
+
+    print("-" * 90, flush=True)
+    print("HEADERS", flush=True)
+    print(json.dumps(dict(request.headers), indent=2, ensure_ascii=False, default=str), flush=True)
+
+    print("-" * 90, flush=True)
+    print("DIAGNOSTICO CAMPOS-CHAVE", flush=True)
+    print(json.dumps(diagnostico, indent=2, ensure_ascii=False, default=str), flush=True)
+
+    print("-" * 90, flush=True)
+    print("CAMINHOS ENCONTRADOS", flush=True)
+    print(json.dumps(detalhes, indent=2, ensure_ascii=False, default=str), flush=True)
+
+    print("-" * 90, flush=True)
+    print("BODY BRUTO", flush=True)
+    print(body_text, flush=True)
+
+    if json_ok:
+        print("-" * 90, flush=True)
+        print("JSON FORMATADO", flush=True)
+        print(json.dumps(payload, indent=2, ensure_ascii=False, default=str), flush=True)
+
+    print("=" * 90, flush=True)
+    print("FIM WEBHOOK SURVEY123", flush=True)
+    print("=" * 90, flush=True)
+    print("", flush=True)
+
+    return {
+        "status": "ok",
+        "versao": "1.0.0-RC2-diagnostic",
+        "mensagem": "Webhook Survey123 recebido com sucesso.",
+        "json_ok": json_ok,
+        "diagnostico": {
+            "objectId": _json_preview(diagnostico.get("objectId"), 300),
+            "globalId": _json_preview(diagnostico.get("globalId"), 300),
+            "featureServiceUrl": _json_preview(diagnostico.get("featureServiceUrl"), 300),
+            "layerId": _json_preview(diagnostico.get("layerId"), 300),
+            "attachments": _json_preview(diagnostico.get("attachments"), 300),
+        },
+        "tempo_s": round(time.perf_counter() - inicio, 4),
+    }
+

@@ -17,8 +17,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(
     title="CEMIG OCR API - Diagnóstico Vercel",
-    version="1.0.0-RC3",
-    description="CEMIG OCR API com integração Survey123: download de anexo e OCR automático.",
+    version="1.0.0-RC4",
+    description="CEMIG OCR API com integração Survey123: download de anexo, OCR automático e atualização da Feature Layer.",
 )
 
 app.add_middleware(
@@ -60,7 +60,7 @@ def erro_payload(etapa: str, exc: Exception, inicio: float):
 def raiz():
     return {
         "status": "ok",
-        "versao": "1.0.0-RC3",
+        "versao": "1.0.0-RC4",
         "mensagem": "FastAPI iniciou sem carregar Paddle/PaddleOCR.",
     }
 
@@ -69,7 +69,7 @@ def raiz():
 def health():
     return {
         "status": "ok",
-        "versao": "1.0.0-RC3",
+        "versao": "1.0.0-RC4",
         "ocr_fast_carregado": OCR_FAST is not None,
         "ocr_robusto_carregado": OCR_ROBUSTO is not None,
         "ambiente": ambiente(),
@@ -131,8 +131,9 @@ async def ocr_conta_cemig(arquivo: UploadFile = File(...)):
 
         return {
             "sucesso": True,
-            "versao": "1.0.0-RC3",
+            "versao": "1.0.0-RC4",
             "arquivo": nome,
+            "updateFeature": update_result,
             "roteamento": roteamento,
             "resultado": resultado,
             "tempos": {
@@ -481,7 +482,7 @@ def _baixar_anexo_survey123(anexo: dict, token: str | None) -> Path:
     os.close(fd)
     caminho = Path(nome_tmp)
 
-    req = urllib.request.Request(url_download, headers={"User-Agent": "cemig-ocr-api/1.0.0-RC3"})
+    req = urllib.request.Request(url_download, headers={"User-Agent": "cemig-ocr-api/1.0.0-RC4"})
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
             dados = resp.read(MAX_UPLOAD_BYTES + 1)
@@ -499,6 +500,193 @@ def _baixar_anexo_survey123(anexo: dict, token: str | None) -> Path:
 
     caminho.write_bytes(dados)
     return caminho
+
+
+def _arcgis_request_json(url: str, params: dict | None = None, timeout: int = 60):
+    query = urllib.parse.urlencode(params or {})
+    url_final = url + (("&" if "?" in url else "?") + query if query else "")
+    req = urllib.request.Request(url_final, headers={"User-Agent": "cemig-ocr-api/1.0.0-RC4"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            texto = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        detalhe = exc.read().decode("utf-8", errors="replace") if hasattr(exc, "read") else ""
+        raise HTTPException(status_code=502, detail=f"Erro HTTP ArcGIS GET {exc.code}: {detalhe[:500]}")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Erro ArcGIS GET: {type(exc).__name__}: {exc}")
+
+    try:
+        return json.loads(texto)
+    except Exception:
+        raise HTTPException(status_code=502, detail=f"Resposta ArcGIS não é JSON: {texto[:500]}")
+
+
+def _arcgis_post_form_json(url: str, data: dict, timeout: int = 90):
+    encoded = urllib.parse.urlencode(data).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=encoded,
+        headers={
+            "User-Agent": "cemig-ocr-api/1.0.0-RC4",
+            "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            texto = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        detalhe = exc.read().decode("utf-8", errors="replace") if hasattr(exc, "read") else ""
+        raise HTTPException(status_code=502, detail=f"Erro HTTP ArcGIS POST {exc.code}: {detalhe[:500]}")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Erro ArcGIS POST: {type(exc).__name__}: {exc}")
+
+    try:
+        return json.loads(texto)
+    except Exception:
+        raise HTTPException(status_code=502, detail=f"Resposta ArcGIS não é JSON: {texto[:500]}")
+
+
+def _converter_data_arcgis(valor):
+    if not valor:
+        return None
+    if isinstance(valor, (int, float)):
+        return valor
+    texto = str(valor).strip()
+    for fmt in ("%d/%m/%Y", "%Y-%m-%d"):
+        try:
+            from datetime import datetime, timezone
+            dt = datetime.strptime(texto, fmt).replace(hour=12, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
+            return int(dt.timestamp() * 1000)
+        except Exception:
+            pass
+    return valor
+
+
+def _obter_metadados_layer(service_url: str, layer_id, token: str | None):
+    if not service_url:
+        return {}
+    url = f"{service_url.rstrip('/')}/{layer_id}"
+    params = {"f": "json"}
+    if token:
+        params["token"] = token
+    dados = _arcgis_request_json(url, params=params, timeout=60)
+    if isinstance(dados, dict) and dados.get("error"):
+        raise HTTPException(status_code=502, detail={"erro_arcgis_metadata": dados.get("error")})
+    return dados if isinstance(dados, dict) else {}
+
+
+def _campo_tipo(metadata: dict):
+    campos = {}
+    for field in metadata.get("fields", []) or []:
+        nome = field.get("name")
+        if nome:
+            campos[nome.lower()] = field.get("type")
+    return campos
+
+
+def _adaptar_valor_arcgis(nome_campo: str, valor, tipos: dict):
+    tipo = tipos.get(nome_campo.lower())
+    if valor is None:
+        return None
+    if tipo == "esriFieldTypeDate":
+        return _converter_data_arcgis(valor)
+    if tipo in {"esriFieldTypeInteger", "esriFieldTypeSmallInteger", "esriFieldTypeOID", "esriFieldTypeBigInteger"}:
+        if isinstance(valor, bool):
+            return 1 if valor else 0
+        try:
+            return int(valor)
+        except Exception:
+            return valor
+    if tipo in {"esriFieldTypeDouble", "esriFieldTypeSingle"}:
+        try:
+            return float(valor)
+        except Exception:
+            return valor
+    if tipo == "esriFieldTypeString":
+        if isinstance(valor, bool):
+            return "Sim" if valor else "Não"
+        return str(valor)
+    return valor
+
+
+def _mapear_resultado_para_feature(resultado: dict, roteamento: dict, tempos: dict):
+    endereco = resultado.get("endereco") or {}
+    identificador = resultado.get("identificador") or {}
+
+    return {
+        "nome": resultado.get("nome"),
+        "logradouro": endereco.get("logradouro"),
+        "numero": endereco.get("numero"),
+        "complemento": endereco.get("complemento"),
+        "bairro": endereco.get("bairro"),
+        "cep": endereco.get("cep"),
+        "cidade": endereco.get("cidade"),
+        "uf": endereco.get("uf"),
+        "unidade_consumidora": identificador.get("valor") if isinstance(identificador, dict) else None,
+        "referencia": resultado.get("referencia"),
+        "vencimento": resultado.get("vencimento"),
+        "valor": resultado.get("valor"),
+        "irpj": resultado.get("impostoRetidoIRPJ"),
+        "valor_validado": resultado.get("valorValidado"),
+        "motor": roteamento.get("motor_escolhido") or roteamento.get("motor"),
+        "tempo_processamento": tempos.get("total_s"),
+        "versao_api": "1.0.0-RC4",
+        "status": "Processado",
+    }
+
+
+def _atualizar_feature_layer_survey123(info: dict, resultado: dict, roteamento: dict, tempos: dict, payload: dict):
+    service_url = info.get("featureServiceUrl")
+    layer_id = info.get("layerId") if info.get("layerId") is not None else 0
+    object_id = info.get("objectId")
+    token = info.get("portalToken")
+
+    if not service_url:
+        raise HTTPException(status_code=400, detail="featureServiceUrl ausente no payload do Survey123.")
+    if object_id is None:
+        raise HTTPException(status_code=400, detail="objectId ausente no payload do Survey123.")
+    if not token:
+        raise HTTPException(status_code=400, detail="portalInfo.token ausente no payload do Survey123.")
+
+    metadata = _obter_metadados_layer(service_url, layer_id, token)
+    tipos = _campo_tipo(metadata)
+    nomes_campos_lower = set(tipos.keys())
+
+    object_id_field = None
+    try:
+        object_id_field = (((payload.get("feature") or {}).get("layerInfo") or {}).get("objectIdField"))
+    except Exception:
+        object_id_field = None
+    object_id_field = object_id_field or metadata.get("objectIdField") or "objectid"
+
+    atributos = {object_id_field: object_id}
+    mapeados = _mapear_resultado_para_feature(resultado, roteamento, tempos)
+    for campo, valor in mapeados.items():
+        if not nomes_campos_lower or campo.lower() in nomes_campos_lower:
+            atributos[campo] = _adaptar_valor_arcgis(campo, valor, tipos)
+
+    url_update = f"{service_url.rstrip('/')}/{layer_id}/updateFeatures"
+    resposta = _arcgis_post_form_json(
+        url_update,
+        {
+            "f": "json",
+            "token": token,
+            "features": json.dumps([{"attributes": atributos}], ensure_ascii=False, default=str),
+        },
+        timeout=90,
+    )
+
+    if isinstance(resposta, dict) and resposta.get("error"):
+        raise HTTPException(status_code=502, detail={"erro_arcgis_update": resposta.get("error")})
+
+    return {
+        "url": url_update,
+        "objectId": object_id,
+        "objectIdField": object_id_field,
+        "attributes": _mascarar_tokens(atributos),
+        "response": resposta,
+    }
 
 
 @app.options("/webhook/survey123")
@@ -533,7 +721,7 @@ async def survey123_webhook(request: Request):
 
     print("", flush=True)
     print("=" * 90, flush=True)
-    print("WEBHOOK SURVEY123 RC3 RECEBIDO", flush=True)
+    print("WEBHOOK SURVEY123 RC4 RECEBIDO", flush=True)
     print("=" * 90, flush=True)
     print(f"METHOD: {request.method}", flush=True)
     print(f"URL: {request.url}", flush=True)
@@ -586,15 +774,22 @@ async def survey123_webhook(request: Request):
         print(json.dumps(roteamento, indent=2, ensure_ascii=False, default=str), flush=True)
         print("TEMPOS", flush=True)
         print(json.dumps(tempos, indent=2, ensure_ascii=False, default=str), flush=True)
+
+        print("-" * 90, flush=True)
+        print("ATUALIZANDO FEATURE LAYER", flush=True)
+        update_result = _atualizar_feature_layer_survey123(info, resultado, roteamento, tempos, payload)
+        print("UPDATE_FEATURE_RESULT", flush=True)
+        print(json.dumps(_mascarar_tokens(update_result), indent=2, ensure_ascii=False, default=str), flush=True)
+
         print("=" * 90, flush=True)
-        print("FIM WEBHOOK SURVEY123 RC3", flush=True)
+        print("FIM WEBHOOK SURVEY123 RC4", flush=True)
         print("=" * 90, flush=True)
         print("", flush=True)
 
         return {
             "status": "ok",
-            "versao": "1.0.0-RC3",
-            "mensagem": "Anexo baixado e OCR executado com sucesso. Feature Layer ainda não foi atualizada nesta RC.",
+            "versao": "1.0.0-RC4",
+            "mensagem": "Anexo baixado, OCR executado e Feature Layer atualizada com sucesso.",
             "survey123": {
                 "objectId": info.get("objectId"),
                 "globalId": info.get("globalId"),
@@ -609,6 +804,7 @@ async def survey123_webhook(request: Request):
                     "globalId": anexo.get("globalId"),
                 },
             },
+            "updateFeature": update_result,
             "roteamento": roteamento,
             "resultado": resultado,
             "tempos": {

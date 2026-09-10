@@ -123,7 +123,7 @@ def _parse_consumo_kwh_numero(texto: str):
     """
     Extrai um valor de consumo em kWh de um fragmento textual.
 
-    Ajuste RC7:
+    Ajuste RC8:
     - evita capturar leituras de medidor como 3.740 / 3.990;
     - prioriza valores inteiros quando o campo é consumo;
     - mantém fallback textual apenas quando não há geometria confiável.
@@ -232,16 +232,295 @@ def _union_geoms(geoms):
     }
 
 
+
+def _consumo_kwh_label(texto: str) -> bool:
+    u = str(texto or "").upper()
+    return "CONSUM" in u and ("KWH" in u or "KW/H" in u or re.search(r"K\s*W\s*/?\s*H", u))
+
+
+def _valor_inteiro_consumo(value):
+    try:
+        v = float(value)
+    except Exception:
+        return None
+    if abs(v - round(v)) < 0.0001:
+        return int(round(v))
+    return v
+
+
+
+
+def _numero_tecnico_para_float(raw: str):
+    """Converte números da tabela técnica para valor numérico.
+
+    Leituras de medidor costumam vir como 3.764 / 3.797, onde o ponto
+    representa milhar, não decimal. Para consumo kWh precisamos tratar
+    esses valores como 3764 / 3797 para permitir o cálculo correto.
+    """
+    if raw is None:
+        return None
+    txt = str(raw).strip()
+    if not txt:
+        return None
+    txt = txt.replace(" ", "")
+    try:
+        if re.fullmatch(r"\d{1,3}[\.,]\d{3}", txt):
+            return float(txt.replace(".", "").replace(",", ""))
+        if re.fullmatch(r"\d{1,6}", txt):
+            return float(int(txt))
+    except Exception:
+        return None
+    return None
+
+
+def _numeros_tecnicos_no_texto(texto: str):
+    """Extrai números técnicos sem pegar números embutidos na medição.
+
+    Ex.: APD167213205 deve ser ignorado, mas 3.764, 3.797, 1 e 33 devem entrar.
+    """
+    if not texto:
+        return []
+    nums = []
+    for m in re.finditer(r"(?<![A-Za-zÀ-ÿ0-9])([0-9]{1,6}(?:[\.,][0-9]{3})?|[0-9]{1,6})(?![A-Za-zÀ-ÿ0-9])", str(texto)):
+        valor = _numero_tecnico_para_float(m.group(1))
+        if valor is None:
+            continue
+        if 0 <= valor <= 2000000:
+            nums.append({"raw": m.group(1), "value": valor, "start": m.start()})
+    return nums
+
+
+def _find_consumo_kwh_textual_tecnico(texts):
+    """Fallback textual específico para a linha 'Informações Técnicas'.
+
+    Trata os três layouts testados:
+    - Energia kWh AMN233207299 3.740 3.990 1 250 -> 250
+    - Energia kWh CPC213102158 134 134 40 0 -> 0
+    - Energia kWh APD167213205 3.764 3.797 1 33 -> 33
+    """
+    if not texts:
+        return None
+
+    normalized = [str(t or "") for t in texts]
+    for i, t in enumerate(normalized):
+        u = t.upper()
+        if not ("ENERG" in u and ("KWH" in u or "KW/H" in u or re.search(r"K\s*W\s*/?\s*H", u))):
+            continue
+
+        janela = " ".join(normalized[i:i + 14])
+        numeros = _numeros_tecnicos_no_texto(janela)
+        valores = [n["value"] for n in numeros]
+
+        # Remove anos ocasionais, mantendo leituras/consumo.
+        valores = [v for v in valores if not (1900 <= v <= 2100)]
+
+        if len(valores) >= 4:
+            prev, atual, constante, direto = valores[0], valores[1], valores[2], valores[3]
+            calculado = _calcular_consumo_por_leituras(prev, atual, constante)
+            direto = _valor_inteiro_consumo(direto)
+            if calculado is not None:
+                if direto is None:
+                    return calculado
+                if abs(float(calculado) - float(direto)) > max(1.0, abs(float(calculado)) * 0.05):
+                    return calculado
+                return direto
+            if direto is not None:
+                return direto
+
+        if len(valores) >= 3:
+            prev, atual, constante = valores[0], valores[1], valores[2]
+            calculado = _calcular_consumo_por_leituras(prev, atual, constante)
+            if calculado is not None:
+                return calculado
+
+    return None
+
+
+def _calcular_consumo_por_leituras(prev, atual, constante):
+    """
+    Calcula consumo pela própria tabela técnica:
+    (Leitura Atual - Leitura Anterior) x Constante de Multiplicação.
+
+    Isso corrige casos em que o OCR confunde a coluna Consumo kWh com
+    Leitura Anterior/Atual ou Constante de Multiplicação.
+    """
+    try:
+        prev = float(prev)
+        atual = float(atual)
+        constante = float(constante)
+    except Exception:
+        return None
+
+    if prev < 0 or atual < 0 or constante < 0:
+        return None
+    if atual < prev:
+        return None
+    if prev > 2000000 or atual > 2000000 or constante > 10000:
+        return None
+
+    consumo = (atual - prev) * constante
+    if consumo < 0 or consumo > 200000:
+        return None
+
+    return _valor_inteiro_consumo(consumo)
+
+
+def _find_consumo_kwh_linha_tecnica(texts, boxes):
+    """
+    Extração preferencial para a tabela 'Informações Técnicas'.
+
+    Regra principal: identificar a linha logo abaixo dos cabeçalhos técnicos
+    e calcular o consumo a partir de:
+        Leitura Anterior, Leitura Atual, Constante de Multiplicação.
+
+    Exemplos tratados:
+    - Elaine: 3.990 - 3.740 = 250, constante 1 => consumo 250
+    - Fiscalização: 134 - 134 = 0, constante 40 => consumo 0
+    """
+    if not texts or boxes is None:
+        return None
+
+    geoms = []
+    for i, box in enumerate(boxes):
+        if i >= len(texts):
+            break
+        geoms.append(box_geometry(box))
+
+    label_indices = [
+        i for i, t in enumerate(texts)
+        if i < len(geoms) and geoms[i] and _consumo_kwh_label(t)
+    ]
+
+    # Quando o OCR separa "Consumo" e "kWh", monta uma âncora combinada.
+    if not label_indices:
+        consumo_indices = [i for i, t in enumerate(texts) if i < len(geoms) and geoms[i] and "CONSUM" in str(t).upper()]
+        kwh_indices = [i for i, t in enumerate(texts) if i < len(geoms) and geoms[i] and ("KWH" in str(t).upper() or "KW/H" in str(t).upper() or re.search(r"K\s*W\s*/?\s*H", str(t).upper()))]
+        for ci in consumo_indices:
+            for ki in kwh_indices:
+                cg, kg = geoms[ci], geoms[ki]
+                if abs(cg["cy"] - kg["cy"]) <= max(cg["height"], kg["height"]) * 2.5:
+                    union = _union_geoms([cg, kg])
+                    if union:
+                        geoms.append(union)
+                        texts.append(f"{texts[ci]} {texts[ki]}")
+                        label_indices.append(len(texts) - 1)
+                        break
+            if label_indices:
+                break
+
+    if not label_indices:
+        return None
+
+    # Usa a âncora de consumo mais à direita, normalmente a coluna final.
+    label_indices = sorted(label_indices, key=lambda idx: geoms[idx]["cx"], reverse=True)
+
+    noise_tokens = (
+        "CONSUM", "KWH", "KW/H", "LEITURA", "MEDIÇÃO", "MEDICAO",
+        "MULTIPLIC", "CONSTANTE", "TIPO", "INFORMA", "TÉCNIC", "TECNIC",
+        "VALOR", "R$", "TOTAL", "BANDEIRA", "CEP", "CNPJ", "CPF",
+        "REFER", "VENCIMENTO", "INSTALA", "UNIDADE CONSUMIDORA",
+    )
+
+    for idx in label_indices:
+        anchor = geoms[idx]
+        ah = max(1.0, anchor["height"])
+
+        candidatos = []
+        for i, text in enumerate(texts):
+            if i >= len(geoms) or not geoms[i]:
+                continue
+            if i == idx:
+                continue
+
+            t = str(text or "")
+            upper = t.upper()
+            if any(tok in upper for tok in noise_tokens):
+                continue
+
+            geom = geoms[i]
+            dy = geom["cy"] - anchor["cy"]
+
+            # Linha de valores imediatamente abaixo dos cabeçalhos técnicos.
+            if dy < ah * 0.25 or dy > max(ah * 9.0, 260.0):
+                continue
+
+            # Não pega blocos muito abaixo (ex.: histórico, totais, mensagens).
+            if geom["height"] > ah * 4.5:
+                continue
+
+            nums = _candidatos_numero_consumo(t, preferir_inteiro=True)
+            if not nums:
+                continue
+
+            for n in nums:
+                candidatos.append({
+                    "x": geom["cx"],
+                    "y": geom["cy"],
+                    "value": n["value"],
+                    "raw": n["raw"],
+                    "text": t,
+                    "geom": geom,
+                })
+
+        if not candidatos:
+            continue
+
+        # Seleciona a primeira linha numérica logo abaixo do cabeçalho.
+        candidatos = sorted(candidatos, key=lambda c: (c["y"], c["x"]))
+        y0 = candidatos[0]["y"]
+        linha = [c for c in candidatos if abs(c["y"] - y0) <= max(ah * 2.8, 45.0)]
+        linha = sorted(linha, key=lambda c: c["x"])
+
+        valores = [c["value"] for c in linha]
+        if len(valores) >= 4:
+            # Últimos quatro valores esperados: leitura anterior, leitura atual,
+            # constante de multiplicação, consumo kWh.
+            prev, atual, constante, direto = valores[-4], valores[-3], valores[-2], valores[-1]
+            calculado = _calcular_consumo_por_leituras(prev, atual, constante)
+            direto = _valor_inteiro_consumo(direto)
+
+            if calculado is not None:
+                # Se o valor direto diverge por OCR ruim (25 no lugar de 250) ou
+                # se a coluna final foi confundida, o cálculo pelas leituras vence.
+                if direto is None:
+                    return calculado
+                if abs(float(calculado) - float(direto)) > max(1.0, abs(float(calculado)) * 0.05):
+                    return calculado
+                return direto
+
+            if direto is not None:
+                return direto
+
+        if len(valores) >= 3:
+            # Caso comum quando o OCR não reconhece o zero final da coluna Consumo:
+            # temos leitura anterior, leitura atual e constante. Ainda assim o
+            # consumo pode ser calculado com segurança.
+            prev, atual, constante = valores[-3], valores[-2], valores[-1]
+            calculado = _calcular_consumo_por_leituras(prev, atual, constante)
+            if calculado is not None:
+                return calculado
+
+        # Fallback dentro da linha técnica: último número mais à direita.
+        ultimo = _valor_inteiro_consumo(linha[-1]["value"])
+        if ultimo is not None:
+            return ultimo
+
+    return None
+
 def _find_consumo_kwh_spatial(texts, boxes):
     """
     Localiza o valor na coluna 'Consumo kWh'.
 
-    Corrige os falsos positivos observados:
-    - Elaine: não capturar '3.740' da Leitura Anterior; capturar '250'.
-    - Fiscalização: não capturar '134' da Leitura Anterior/Atual; capturar '0'.
+    RC8: antes de usar a distância visual simples, tenta calcular o consumo
+    pela linha técnica: (Leitura Atual - Leitura Anterior) x Constante.
+    Isso evita pegar 'Constante de Multiplicação' ou leituras do medidor.
     """
     if not texts or boxes is None:
         return None
+
+    valor_linha_tecnica = _find_consumo_kwh_linha_tecnica(list(texts), boxes)
+    if valor_linha_tecnica is not None:
+        return valor_linha_tecnica
 
     geoms = []
     for i, box in enumerate(boxes):
@@ -353,11 +632,15 @@ def find_consumo_kwh(texts, boxes=None):
     """
     Extrai o campo 'Consumo kWh' quando disponível.
 
-    RC7: a extração usa primeiro a posição visual da coluna 'Consumo kWh'.
+    RC8: a extração usa primeiro a linha técnica ou a posição visual da coluna 'Consumo kWh'.
     Isso evita confundir o consumo com 'Leitura Anterior' ou 'Leitura Atual'.
     """
     if not texts:
         return None
+
+    valor_textual_tecnico = _find_consumo_kwh_textual_tecnico(texts)
+    if valor_textual_tecnico is not None:
+        return valor_textual_tecnico
 
     valor_spatial = _find_consumo_kwh_spatial(texts, boxes)
     if valor_spatial is not None:

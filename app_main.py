@@ -16,9 +16,9 @@ from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Request, Resp
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(
-    title="CEMIG OCR API - Survey123 RC7",
-    version="1.0.0-RC7",
-    description="CEMIG OCR API RC7: OCR CEMIG e integração limpa com Survey123.",
+    title="CEMIG OCR API - Survey123 RC9",
+    version="1.0.0-RC9",
+    description="CEMIG OCR API RC9: refinamento do Consumo kWh por linha técnica.",
 )
 
 app.add_middleware(
@@ -60,7 +60,7 @@ def erro_payload(etapa: str, exc: Exception, inicio: float):
 def raiz():
     return {
         "status": "ok",
-        "versao": "1.0.0-RC7",
+        "versao": "1.0.0-RC9",
         "mensagem": "FastAPI iniciou sem carregar Paddle/PaddleOCR.",
     }
 
@@ -69,7 +69,7 @@ def raiz():
 def health():
     return {
         "status": "ok",
-        "versao": "1.0.0-RC7",
+        "versao": "1.0.0-RC9",
         "ocr_fast_carregado": OCR_FAST is not None,
         "ocr_robusto_carregado": OCR_ROBUSTO is not None,
         "ambiente": ambiente(),
@@ -131,7 +131,7 @@ async def ocr_conta_cemig(arquivo: UploadFile = File(...)):
 
         return {
             "sucesso": True,
-            "versao": "1.0.0-RC7",
+            "versao": "1.0.0-RC9",
             "arquivo": nome,
             "roteamento": roteamento,
             "resultado": resultado,
@@ -481,7 +481,7 @@ def _baixar_anexo_survey123(anexo: dict, token: str | None) -> Path:
     os.close(fd)
     caminho = Path(nome_tmp)
 
-    req = urllib.request.Request(url_download, headers={"User-Agent": "cemig-ocr-api/1.0.0-RC7"})
+    req = urllib.request.Request(url_download, headers={"User-Agent": "cemig-ocr-api/1.0.0-RC8"})
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
             dados = resp.read(MAX_UPLOAD_BYTES + 1)
@@ -504,7 +504,7 @@ def _baixar_anexo_survey123(anexo: dict, token: str | None) -> Path:
 def _arcgis_request_json(url: str, params: dict | None = None, timeout: int = 60):
     query = urllib.parse.urlencode(params or {})
     url_final = url + (("&" if "?" in url else "?") + query if query else "")
-    req = urllib.request.Request(url_final, headers={"User-Agent": "cemig-ocr-api/1.0.0-RC7"})
+    req = urllib.request.Request(url_final, headers={"User-Agent": "cemig-ocr-api/1.0.0-RC8"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             texto = resp.read().decode("utf-8", errors="replace")
@@ -526,7 +526,7 @@ def _arcgis_post_form_json(url: str, data: dict, timeout: int = 90):
         url,
         data=encoded,
         headers={
-            "User-Agent": "cemig-ocr-api/1.0.0-RC7",
+            "User-Agent": "cemig-ocr-api/1.0.0-RC8",
             "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
         },
         method="POST",
@@ -631,7 +631,7 @@ def _mapear_resultado_para_feature(resultado: dict, roteamento: dict, tempos: di
         "valor_validado": resultado.get("valorValidado"),
         "motor": roteamento.get("motor_escolhido") or roteamento.get("motor"),
         "tempo_processamento": tempos.get("total_s"),
-        "versao_api": "1.0.0-RC7",
+        "versao_api": "1.0.0-RC9",
         "status": "Processado",
     }
 
@@ -721,25 +721,25 @@ def _processar_survey123_em_background(payload: dict, meta: dict | None = None):
         service_url = info.get("featureServiceUrl")
 
         print(
-            f"[SURVEY123 RC7] início objectId={object_id} globalId={global_id} "
+            f"[SURVEY123 RC8] início objectId={object_id} globalId={global_id} "
             f"layerId={layer_id} anexos={len(anexos)} bytes={meta.get('body_bytes')}",
             flush=True,
         )
 
         if not anexos:
-            print(f"[SURVEY123 RC7] erro objectId={object_id}: nenhum anexo encontrado", flush=True)
+            print(f"[SURVEY123 RC8] erro objectId={object_id}: nenhum anexo encontrado", flush=True)
             return
 
         anexo = anexos[0]
         print(
-            f"[SURVEY123 RC7] baixando anexo objectId={object_id} "
+            f"[SURVEY123 RC8] baixando anexo objectId={object_id} "
             f"nome={anexo.get('name')} tipo={anexo.get('contentType')} tamanho={anexo.get('size')}",
             flush=True,
         )
 
         caminho = _baixar_anexo_survey123(anexo, info.get("portalToken"))
         tamanho = caminho.stat().st_size
-        print(f"[SURVEY123 RC7] anexo baixado objectId={object_id} bytes={tamanho}", flush=True)
+        print(f"[SURVEY123 RC8] anexo baixado objectId={object_id} bytes={tamanho}", flush=True)
 
         inicio_ocr = time.perf_counter()
         motor, roteamento = _obter_motor_para_documento(caminho)
@@ -754,7 +754,7 @@ def _processar_survey123_em_background(payload: dict, meta: dict | None = None):
         )
 
         print(
-            f"[SURVEY123 RC7] processado objectId={object_id} "
+            f"[SURVEY123 RC8] processado objectId={object_id} "
             f"nome={resultado.get('nome')} ref={resultado.get('referencia')} "
             f"valor={resultado.get('valor')} validado={resultado.get('valorValidado')} "
             f"motor={roteamento.get('motor_escolhido') or roteamento.get('motor')} "
@@ -765,7 +765,7 @@ def _processar_survey123_em_background(payload: dict, meta: dict | None = None):
 
     except Exception as exc:
         print(
-            f"[SURVEY123 RC7] erro objectId={info.get('objectId') if isinstance(info, dict) else None}: "
+            f"[SURVEY123 RC8] erro objectId={info.get('objectId') if isinstance(info, dict) else None}: "
             f"{type(exc).__name__}: {exc}",
             flush=True,
         )
@@ -793,7 +793,7 @@ async def survey123_webhook(request: Request, background_tasks: BackgroundTasks)
     anexos = info.get("attachments") or []
 
     print(
-        f"[SURVEY123 RC7] recebido objectId={info.get('objectId')} "
+        f"[SURVEY123 RC8] recebido objectId={info.get('objectId')} "
         f"globalId={info.get('globalId')} layerId={info.get('layerId')} "
         f"anexos={len(anexos)} body_bytes={len(body)}",
         flush=True,
@@ -807,7 +807,7 @@ async def survey123_webhook(request: Request, background_tasks: BackgroundTasks)
 
     return {
         "status": "accepted",
-        "versao": "1.0.0-RC7",
+        "versao": "1.0.0-RC9",
         "mensagem": "Webhook recebido. Processamento OCR iniciado em background.",
         "objectId": info.get("objectId"),
         "globalId": info.get("globalId"),

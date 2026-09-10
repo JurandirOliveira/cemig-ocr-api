@@ -121,72 +121,231 @@ def find_reference_near_top(texts):
 
 def _parse_consumo_kwh_numero(texto: str):
     """
-    Extrai um valor de consumo em kWh de um fragmento de texto OCR.
+    Extrai um valor de consumo em kWh de um fragmento textual.
 
-    Retorna número (int quando possível) ou None. Evita confundir consumo
-    com valores monetários, datas, CEP, linha digitável ou unidades/instalações.
+    Ajuste RC7:
+    - evita capturar leituras de medidor como 3.740 / 3.990;
+    - prioriza valores inteiros quando o campo é consumo;
+    - mantém fallback textual apenas quando não há geometria confiável.
     """
-    if not texto:
+    candidatos = _candidatos_numero_consumo(texto, preferir_inteiro=True)
+    if not candidatos:
         return None
+
+    upper = str(texto or "").upper()
+    kwh_match = re.search(r"K\s*W\s*/?\s*H|KWH", upper)
+    if kwh_match:
+        depois = [c for c in candidatos if c["start"] >= kwh_match.end()]
+        escolhido = depois[0] if depois else min(candidatos, key=lambda c: abs(c["start"] - kwh_match.start()))
+    else:
+        escolhido = candidatos[0]
+
+    valor = escolhido["value"]
+    return int(valor) if isinstance(valor, float) and abs(valor - int(valor)) < 0.0001 else valor
+
+
+def _candidatos_numero_consumo(texto: str, preferir_inteiro: bool = False):
+    """Retorna candidatos numéricos plausíveis para consumo kWh em uma caixa OCR."""
+    if not texto:
+        return []
 
     original = str(texto)
     upper = original.upper()
 
-    # Não tratar valores monetários/códigos como consumo.
     if "R$" in upper:
-        return None
+        return []
     if re.search(r"\d{2}/\d{2}/\d{4}", original):
-        return None
+        return []
     if re.search(r"\d{5}-\d{3}", original):
-        return None
+        return []
     if re.search(r"\d{11}-\d", original):
-        return None
+        return []
+    if any(token in upper for token in ("CPF", "CNPJ", "CEP", "INSTALA", "UNIDADE CONSUMIDORA")):
+        return []
 
-    # Preferimos números inteiros ou decimais simples; consumo normalmente
-    # aparece como quantidade, não como moeda 1.234,56.
     candidatos = []
-    for m in re.finditer(r"(?<![\d.,-])(\d{1,6})(?:[.,](\d{1,3}))?(?![\d.,-])", original):
-        inteiro = m.group(1)
-        decimal = m.group(2)
 
-        # Evita anos comuns e identificadores longos quando aparecem isolados.
+    # Números com separador de milhar: 1.250 -> 1250.
+    for m in re.finditer(r"(?<![\d.,-])(\d{1,3}(?:\.\d{3})+)(?![\d.,-])", original):
+        raw = m.group(1)
         try:
-            inteiro_int = int(inteiro)
+            valor = float(raw.replace(".", ""))
         except Exception:
             continue
+        if 0 <= valor <= 200000:
+            candidatos.append({"start": m.start(), "raw": raw, "value": valor, "tipo": "inteiro_milhar"})
 
-        if decimal and len(decimal) == 2 and "KWH" not in upper and "KW/H" not in upper:
-            # Dois decimais longe de kWh provavelmente são moeda.
+    # Inteiros simples: 0, 250, 134 etc.
+    for m in re.finditer(r"(?<![\d.,-])(\d{1,6})(?![\d.,-])", original):
+        raw = m.group(1)
+        try:
+            valor = float(int(raw))
+        except Exception:
             continue
-        if 1900 <= inteiro_int <= 2100:
+        if 1900 <= valor <= 2100:
             continue
+        if 0 <= valor <= 200000:
+            candidatos.append({"start": m.start(), "raw": raw, "value": valor, "tipo": "inteiro"})
 
-        if decimal:
+    # Decimais só entram como fallback, porque nos layouts CEMIG testados
+    # as leituras do medidor aparecem como 3.740/3.990 e não são consumo.
+    if not preferir_inteiro:
+        for m in re.finditer(r"(?<![\d.,-])(\d{1,6})[,.](\d{1,3})(?![\d.,-])", original):
+            inteiro, decimal = m.group(1), m.group(2)
+            # Dois decimais tendem a ser moeda; três decimais tendem a ser leitura.
+            if len(decimal) in (2, 3):
+                continue
             try:
                 valor = float(f"{inteiro}.{decimal}")
             except Exception:
                 continue
-        else:
-            valor = float(inteiro_int)
+            if 0 <= valor <= 200000:
+                candidatos.append({"start": m.start(), "raw": m.group(0), "value": valor, "tipo": "decimal"})
 
-        # Faixa ampla, mas evita zeros absurdos/códigos.
-        if 0 <= valor <= 200000:
-            candidatos.append((m.start(), valor))
+    # Remove duplicidades geradas por regex sobrepostas.
+    vistos = set()
+    unicos = []
+    for c in sorted(candidatos, key=lambda item: item["start"]):
+        chave = (c["start"], c["raw"])
+        if chave in vistos:
+            continue
+        vistos.add(chave)
+        unicos.append(c)
+    return unicos
 
-    if not candidatos:
+
+def _union_geoms(geoms):
+    geoms = [g for g in geoms if g]
+    if not geoms:
+        return None
+    left = min(g["left_x"] for g in geoms)
+    right = max(g["right_x"] for g in geoms)
+    cy = sum(g["cy"] for g in geoms) / len(geoms)
+    height = max(g["height"] for g in geoms)
+    return {
+        "cx": (left + right) / 2.0,
+        "cy": cy,
+        "height": max(1.0, height),
+        "left_x": left,
+        "right_x": right,
+        "slope": 0.0,
+    }
+
+
+def _find_consumo_kwh_spatial(texts, boxes):
+    """
+    Localiza o valor na coluna 'Consumo kWh'.
+
+    Corrige os falsos positivos observados:
+    - Elaine: não capturar '3.740' da Leitura Anterior; capturar '250'.
+    - Fiscalização: não capturar '134' da Leitura Anterior/Atual; capturar '0'.
+    """
+    if not texts or boxes is None:
         return None
 
-    # Se existir kWh no texto, preferir número mais próximo depois do kWh.
-    kwh_match = re.search(r"K\s*W\s*/?\s*H|KWH", upper)
-    if kwh_match:
-        depois = [c for c in candidatos if c[0] >= kwh_match.end()]
-        if depois:
-            valor = depois[0][1]
-        else:
-            valor = min(candidatos, key=lambda c: abs(c[0] - kwh_match.start()))[1]
-    else:
-        valor = candidatos[0][1]
+    geoms = []
+    for i, box in enumerate(boxes):
+        if i >= len(texts):
+            break
+        geom = box_geometry(box)
+        geoms.append(geom)
 
+    anchors = []
+
+    # Âncora forte: CONSUMO + KWH na mesma caixa.
+    for i, text in enumerate(texts):
+        if i >= len(geoms) or not geoms[i]:
+            continue
+        upper = str(text).upper()
+        if "CONSUM" in upper and ("KWH" in upper or "KW/H" in upper or re.search(r"K\s*W\s*/?\s*H", upper)):
+            direto = _parse_consumo_kwh_numero(text)
+            if direto is not None:
+                return direto
+            anchors.append({"geom": geoms[i], "idx": i, "text": text})
+
+    # Âncora dividida: uma caixa com CONSUMO e outra próxima com KWH.
+    consumo_indices = [i for i, t in enumerate(texts) if "CONSUM" in str(t).upper() and i < len(geoms) and geoms[i]]
+    kwh_indices = [i for i, t in enumerate(texts) if ("KWH" in str(t).upper() or "KW/H" in str(t).upper() or re.search(r"K\s*W\s*/?\s*H", str(t).upper())) and i < len(geoms) and geoms[i]]
+
+    for ci in consumo_indices:
+        cg = geoms[ci]
+        for ki in kwh_indices:
+            kg = geoms[ki]
+            same_row = abs(cg["cy"] - kg["cy"]) <= max(cg["height"], kg["height"]) * 2.8
+            close_x = abs(cg["cx"] - kg["cx"]) <= max(450.0, (cg["right_x"] - cg["left_x"] + kg["right_x"] - kg["left_x"]) * 3.5)
+            if same_row and close_x:
+                union = _union_geoms([cg, kg])
+                if union:
+                    anchors.append({"geom": union, "idx": min(ci, ki), "text": f"{texts[ci]} {texts[ki]}"})
+
+    if not anchors:
+        return None
+
+    noise_tokens = (
+        "LEITURA", "MEDIÇÃO", "MEDICAO", "MULTIPLIC", "CONSTANTE",
+        "TIPO", "TARIFA", "BANDEIRA", "VALOR", "VENCIMENTO",
+        "REFER", "TOTAL", "R$", "CNPJ", "CPF", "CEP",
+    )
+
+    melhores = []
+    for anchor in anchors:
+        ag = anchor["geom"]
+        aw = max(1.0, ag["right_x"] - ag["left_x"])
+        ah = max(1.0, ag["height"])
+
+        # Região da coluna Consumo kWh. Mantém folga para variação de OCR/perspectiva,
+        # mas não atravessa até as colunas de leitura anterior/atual.
+        left_limit = ag["left_x"] - max(aw * 0.45, 45.0)
+        right_limit = ag["right_x"] + max(aw * 0.85, 75.0)
+        y_min = ag["cy"] - ah * 0.35
+        y_max = ag["cy"] + max(ah * 10.0, 220.0)
+
+        for i, text in enumerate(texts):
+            if i >= len(geoms) or not geoms[i]:
+                continue
+            if i == anchor["idx"]:
+                continue
+
+            t = str(text)
+            upper = t.upper()
+            if any(tok in upper for tok in noise_tokens):
+                continue
+
+            geom = geoms[i]
+            if geom["cy"] < y_min or geom["cy"] > y_max:
+                continue
+            if geom["cx"] < left_limit or geom["cx"] > right_limit:
+                continue
+
+            candidatos = _candidatos_numero_consumo(t, preferir_inteiro=True)
+            if not candidatos:
+                continue
+
+            # Preferir números inteiros. Em caso de múltiplos, usar o último da caixa,
+            # pois a coluna de consumo costuma ficar à direita.
+            cand = candidatos[-1]
+            dx = abs(geom["cx"] - ag["cx"]) / max(aw, 1.0)
+            dy = max(0.0, geom["cy"] - ag["cy"]) / ah
+
+            # Penaliza muito caixas acima do rótulo ou à esquerda/distantes.
+            score = dy + dx * 0.9
+            if geom["cy"] < ag["cy"]:
+                score += 5.0
+
+            melhores.append({
+                "score": score,
+                "value": cand["value"],
+                "text": t,
+                "anchor": anchor["text"],
+                "dx": dx,
+                "dy": dy,
+            })
+
+    if not melhores:
+        return None
+
+    escolhido = sorted(melhores, key=lambda item: item["score"])[0]
+    valor = escolhido["value"]
     return int(valor) if abs(valor - int(valor)) < 0.0001 else valor
 
 
@@ -194,14 +353,15 @@ def find_consumo_kwh(texts, boxes=None):
     """
     Extrai o campo 'Consumo kWh' quando disponível.
 
-    Estratégia conservadora:
-    1. procura rótulos explícitos 'Consumo kWh' / 'kWh';
-    2. captura a quantidade na mesma linha ou nas próximas linhas OCR;
-    3. ignora histórico, valores monetários e identificadores;
-    4. retorna None quando não houver evidência forte.
+    RC7: a extração usa primeiro a posição visual da coluna 'Consumo kWh'.
+    Isso evita confundir o consumo com 'Leitura Anterior' ou 'Leitura Atual'.
     """
     if not texts:
         return None
+
+    valor_spatial = _find_consumo_kwh_spatial(texts, boxes)
+    if valor_spatial is not None:
+        return valor_spatial
 
     def is_noise_context(t: str) -> bool:
         u = str(t).upper()
@@ -210,9 +370,10 @@ def find_consumo_kwh(texts, boxes=None):
             "VALOR", "VENCIMENTO", "REFERÊNCIA", "REFERENCIA",
             "LINHA DIGIT", "CÓDIGO", "CODIGO", "INSTALAÇÃO",
             "UNIDADE CONSUMIDORA", "CEP", "CNPJ", "CPF",
+            "LEITURA", "MEDIÇÃO", "MEDICAO", "MULTIPLIC", "CONSTANTE",
         )) and not ("CONSUMO" in u and ("KWH" in u or "KW/H" in u))
 
-    # Caso forte: texto contém simultaneamente CONSUMO e KWH.
+    # Fallback textual, mais restritivo: só aceita valores após âncora CONSUMO/KWH.
     for i, text in enumerate(texts):
         upper = str(text).upper()
         if "CONSUM" in upper and ("KWH" in upper or "KW/H" in upper or re.search(r"K\s*W\s*/?\s*H", upper)):
@@ -222,33 +383,6 @@ def find_consumo_kwh(texts, boxes=None):
             for j in range(i + 1, min(i + 8, len(texts))):
                 if is_noise_context(texts[j]):
                     continue
-                valor = _parse_consumo_kwh_numero(texts[j])
-                if valor is not None:
-                    return valor
-
-    # Caso tabela: rótulo CONSUMO próximo de KWH separado em outro fragmento.
-    for i, text in enumerate(texts):
-        upper = str(text).upper()
-        if "CONSUM" not in upper:
-            continue
-        janela = " ".join(str(t).upper() for t in texts[i:min(i + 6, len(texts))])
-        if not ("KWH" in janela or "KW/H" in janela or re.search(r"K\s*W\s*/?\s*H", janela)):
-            continue
-        for j in range(i, min(i + 10, len(texts))):
-            if is_noise_context(texts[j]):
-                continue
-            valor = _parse_consumo_kwh_numero(texts[j])
-            if valor is not None:
-                return valor
-
-    # Caso linha de item: 'Energia Elétrica kWh <quantidade> ...'
-    for i, text in enumerate(texts):
-        upper = str(text).upper()
-        if ("KWH" in upper or "KW/H" in upper or re.search(r"K\s*W\s*/?\s*H", upper)) and "ENERG" in upper:
-            valor = _parse_consumo_kwh_numero(text)
-            if valor is not None:
-                return valor
-            for j in range(i + 1, min(i + 5, len(texts))):
                 valor = _parse_consumo_kwh_numero(texts[j])
                 if valor is not None:
                     return valor

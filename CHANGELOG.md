@@ -1,3 +1,10 @@
+# CHANGELOG
+
+## 1.0.0-RC7
+- Refinamento da extração de Consumo kWh por posição visual da coluna.
+- Evita confundir consumo com Leitura Anterior/Atual.
+- Mantém endpoint OCR e webhook Survey123 compatíveis.
+
 
 ## 1.0.0-RC6
 

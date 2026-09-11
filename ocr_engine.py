@@ -1265,7 +1265,285 @@ def parse_digital_customer(texts, boxes):
     return nome, address
 
 
+
+
+# ----------------------------------------------------------------------
+# RC10 - Parser específico para layout NF3e / fatura eletrônica CEMIG
+# ----------------------------------------------------------------------
+def _linha_tem_token_instalacao(texto: str) -> bool:
+    u = str(texto or "").upper()
+    return "INSTALA" in u and ("Nº" in u or "N°" in u or "N." in u or "N " in u or "DA INSTALA" in u)
+
+
+def _is_layout_nf3e_instalacao(lines):
+    joined = "\n".join(str(x or "") for x in (lines or [])).upper()
+    return (
+        "DOCUMENTO AUXILIAR" in joined
+        and ("NOTA FISCAL" in joined or "NF3E" in joined or "ENERGIA ELÉTRICA ELETRÔNICA" in joined or "ENERGIA ELETRICA ELETRONICA" in joined)
+        and "INSTALA" in joined
+        and ("VALORES FATURADOS" in joined or "ITENS DA FATURA" in joined)
+    )
+
+
+def _parse_linha_endereco_nf3e(line):
+    texto = normalize_text(line)
+    m = re.match(r"(.+?)\s+(\d+)(?:\s+(.*))?$", texto)
+    if not m:
+        return None
+    return {
+        "logradouro": m.group(1).strip(),
+        "numero": m.group(2).strip(),
+        "complemento": (m.group(3) or "").strip() or None,
+    }
+
+
+def _parse_consumo_tecnico_nf3e(lines):
+    if not lines:
+        return None
+
+    def avaliar_valores(valores):
+        valores = [v for v in valores if not (1900 <= v <= 2100)]
+        if len(valores) >= 4:
+            prev, atual, constante, direto = valores[-4], valores[-3], valores[-2], valores[-1]
+            calculado = _calcular_consumo_por_leituras(prev, atual, constante)
+            direto = _valor_inteiro_consumo(direto)
+            if calculado is not None:
+                if direto is None:
+                    return calculado
+                if abs(float(calculado) - float(direto)) > max(1.0, abs(float(calculado)) * 0.05):
+                    return calculado
+                return direto
+            if direto is not None:
+                return direto
+        if len(valores) >= 3:
+            prev, atual, constante = valores[-3], valores[-2], valores[-1]
+            calculado = _calcular_consumo_por_leituras(prev, atual, constante)
+            if calculado is not None:
+                return calculado
+        return None
+
+    # PyMuPDF normalmente separa a tabela em tokens/linhas:
+    # Energia kWh | APG218001510 | 4.234 | 4.410 | 1 | 176
+    anchors = [
+        i for i, line in enumerate(lines)
+        if "INFORMA" in str(line or "").upper() and ("TÉCN" in str(line or "").upper() or "TECN" in str(line or "").upper())
+    ]
+    if anchors:
+        indices = []
+        for a in anchors:
+            indices.extend(range(a + 1, min(len(lines), a + 30)))
+    else:
+        indices = range(0, len(lines))
+
+    for i in indices:
+        line = str(lines[i] or "")
+        u = line.upper()
+        if "ENERGIA ELÉTRICA" in u or "ENERGIA ELETRICA" in u:
+            continue
+        if not ("ENERG" in u and ("KWH" in u or "KW/H" in u or re.search(r"K\s*W\s*/?\s*H", u))):
+            continue
+
+        # 1) tenta a linha inteira, quando o texto veio reconstruído.
+        nums_linha = _numeros_tecnicos_no_texto(str(line))
+        valor = avaliar_valores([n["value"] for n in nums_linha])
+        if valor is not None:
+            return valor
+
+        # 2) tenta os próximos fragmentos, quando cada célula veio separada.
+        janela = []
+        for item in lines[i + 1:min(len(lines), i + 9)]:
+            ui = str(item or "").upper()
+            if any(tok in ui for tok in ("DOCUMENTO AUXILIAR", "INFORMAÇÕES GERAIS", "INFORMACOES GERAIS", "HISTÓRICO", "HISTORICO", "RESERVADO", "VALORES FATURADOS")):
+                break
+            janela.append(item)
+        valores = []
+        for item in janela:
+            nums = _numeros_tecnicos_no_texto(str(item))
+            for n in nums:
+                valores.append(n["value"])
+        valor = avaliar_valores(valores)
+        if valor is not None:
+            return valor
+
+    return None
+
+
+def _parse_nf3e_instalacao_from_lines(lines):
+    """Extrai campos do layout eletrônico/NF3e da CEMIG.
+
+    Exemplo tratado:
+    - CENTRO DE REFERENCIA DA MULHER - SE
+    - RUA ANTONINO FONSECA JUNIOR 88 CS
+    - CENTRO
+    - 34000-099 NOVA LIMA, MG
+    - Nº DA INSTALAÇÃO / 3000009130
+    - JAN/2025 24/02/2025 65,81
+    - Energia kWh ... 4.234 4.410 1 176
+    """
+    if not lines:
+        return None
+
+    lines = [normalize_text(x) for x in lines if normalize_text(x)]
+    if not _is_layout_nf3e_instalacao(lines):
+        return None
+
+    # Cliente/endereço: CEP de Nova Lima é a âncora mais segura.
+    cep_idx = None
+    cep_match = None
+    for i, line in enumerate(lines):
+        m = re.search(r"(\d{5}-\d{3})\s+(.+?)[,\s]+([A-Z]{2})$", line.upper())
+        if m and "BELO HORIZONTE" not in line.upper():
+            cep_idx = i
+            cep_match = m
+            break
+
+    endereco = {
+        "logradouro": None,
+        "numero": None,
+        "complemento": None,
+        "bairro": None,
+        "cep": None,
+        "cidade": None,
+        "uf": None,
+    }
+    nome = None
+
+    if cep_idx is not None and cep_match:
+        endereco["cep"] = cep_match.group(1)
+        endereco["cidade"] = cep_match.group(2).strip(" ,")
+        endereco["uf"] = cep_match.group(3)
+        if cep_idx - 1 >= 0:
+            bairro = lines[cep_idx - 1].strip()
+            if bairro and not re.search(r"\d", bairro):
+                endereco["bairro"] = bairro
+        if cep_idx - 2 >= 0:
+            parsed_addr = _parse_linha_endereco_nf3e(lines[cep_idx - 2])
+            if parsed_addr:
+                endereco.update(parsed_addr)
+        if cep_idx - 3 >= 0:
+            candidate = lines[cep_idx - 3].strip()
+            if candidate and not re.search(r"\d", candidate) and not looks_like_header_noise(candidate):
+                nome = candidate
+
+    # Instalação.
+    instalacao = None
+    for i, line in enumerate(lines):
+        if _linha_tem_token_instalacao(line):
+            janela = " ".join(lines[i:i + 4])
+            nums = re.findall(r"(?<!\d)(\d{8,12})(?!\d)", janela)
+            if nums:
+                # Evita código de débito automático quando ele aparece antes da instalação.
+                # Quando há dois números, a instalação costuma ser o último ou o que começa com 3000.
+                pref = [n for n in nums if n.startswith("3000")]
+                instalacao = pref[0] if pref else nums[-1]
+                break
+    if not instalacao:
+        for line in lines:
+            if "CÓDIGO DE DÉBITO" in line.upper() or "CODIGO DE DEBITO" in line.upper():
+                nums = re.findall(r"(?<!\d)(\d{8,12})(?!\d)", line)
+                pref = [n for n in nums if n.startswith("3000")]
+                if pref:
+                    instalacao = pref[0]
+                    break
+
+    # Referência / vencimento / valor.
+    referencia = None
+    vencimento = None
+    valor = None
+    for line in lines:
+        m = re.search(r"\b([A-Z]{3}/\d{4})\s+(\d{2}/\d{2}/\d{4})\s+(?:R\$\s*)?([0-9]{1,3}(?:\.[0-9]{3})*,[0-9]{2}|[0-9]+,[0-9]{2})\b", line.upper())
+        if m:
+            referencia = m.group(1)
+            vencimento = m.group(2)
+            valor = parse_money(m.group(3))["value"] if parse_money(m.group(3)) else None
+            break
+
+    if not referencia:
+        for line in lines:
+            m = re.search(r"\b([A-Z]{3}/\d{4})\b", line.upper())
+            if m:
+                referencia = m.group(1)
+                break
+
+    if not vencimento:
+        vencimento = find_date_after_anchor(lines, "Vencimento", max_distance=8)
+
+    if valor is None:
+        parsed = find_money_after_anchor(lines, "Total a pagar", max_distance=4) or find_money_after_anchor(lines, "Valor a pagar", max_distance=8)
+        if parsed:
+            valor = parsed["value"]
+
+    # IRPJ somente quando há rótulo explícito.
+    irpj = None
+    for i, line in enumerate(lines):
+        if "IRPJ" in line.upper() and "IMPOST" in line.upper():
+            janela = " ".join(lines[i:min(len(lines), i + 4)])
+            valores = extract_money_tokens(janela)
+            if valores:
+                negativos = [v for v in valores if v < 0]
+                irpj = negativos[0] if negativos else -abs(valores[-1])
+                break
+
+    consumo = _parse_consumo_tecnico_nf3e(lines)
+
+    if not (nome and endereco.get("logradouro") and endereco.get("cep") and instalacao and referencia and vencimento and valor is not None):
+        return None
+
+    return {
+        "nome": nome,
+        "endereco": endereco,
+        "identificador": {"tipo": "instalacao", "valor": instalacao},
+        "referencia": referencia,
+        "vencimento": vencimento,
+        "valor": valor,
+        "consumoKWh": consumo,
+        "impostoRetidoIRPJ": irpj,
+        "valorValidado": False,
+        "linhaDigitavel": None,
+        "validacao": {
+            "ocr_topo": valor,
+            "ocr_rodape": valor,
+            "ocr_concordante": True,
+            "codigo_barras": None,
+            "codigo_barras_valido": False,
+            "valor_confere_codigo_barras": False,
+            "febraban": {
+                "valido": False,
+                "erro": "Linha digitável não encontrada."
+            },
+        },
+    }
+
+
+def extract_pdf_text_layout(input_path: Path):
+    """Fallback sem OCR para PDFs digitais CEMIG/NF3e."""
+    if Path(input_path).suffix.lower() != ".pdf":
+        return None
+    try:
+        doc = fitz.open(str(input_path))
+        texto = "\n".join(page.get_text("text") for page in doc)
+        doc.close()
+    except Exception as exc:
+        print(f"[PDF TEXT RC10] falha ao extrair texto direto: {type(exc).__name__}: {exc}", flush=True)
+        return None
+
+    lines = [normalize_text(line) for line in texto.splitlines() if normalize_text(line)]
+    resultado = _parse_nf3e_instalacao_from_lines(lines)
+    if resultado:
+        print(
+            f"[PDF TEXT RC10] layout NF3e reconhecido nome={resultado.get('nome')} "
+            f"instalacao={(resultado.get('identificador') or {}).get('valor')} "
+            f"ref={resultado.get('referencia')} valor={resultado.get('valor')} "
+            f"consumo={resultado.get('consumoKWh')}",
+            flush=True,
+        )
+    return resultado
+
 def extract_fields(texts, boxes=None):
+    nf3e_resultado = _parse_nf3e_instalacao_from_lines(texts)
+    if nf3e_resultado:
+        return nf3e_resultado
+
     # Baseline/legado permanece intocado.
     # O parser dedicado só entra quando o documento contém Unidade Consumidora.
     if is_digital_layout(texts):
@@ -2085,6 +2363,25 @@ def process_document(input_path: Path, ocr, save_debug: bool = False):
         raise ValueError("Formato não suportado. Use JPG, JPEG, PNG ou PDF.")
 
     total_start = time.perf_counter()
+
+    if input_path.suffix.lower() == ".pdf":
+        t0 = time.perf_counter()
+        direto = extract_pdf_text_layout(input_path)
+        direct_time = time.perf_counter() - t0
+        if direto is not None:
+            return direto, {
+                "preparacao_imagem_s": round(direct_time, 4),
+                "inferencia_ocr_s": 0.0,
+                "parser_febraban_s": 0.0,
+                "total_s": round(time.perf_counter() - total_start, 4),
+                "imagem": {
+                    "tipo": "pdf_text_direto",
+                    "redimensionada": False,
+                    "dimensoes_originais": None,
+                    "dimensoes_processadas": None,
+                },
+            }
+
     temp_ocr_path = None
 
     try:

@@ -8,3 +8,9 @@
 
 ## 1.0.0-RC8
 - Correção inicial da extração de Consumo kWh por linha técnica.
+
+
+## v1.0.0-RC10
+
+- Adicionado suporte ao layout eletrônico/NF3e da CEMIG por extração direta de texto em PDF.
+- Captura de nome, endereço, instalação, referência, vencimento, valor, IRPJ e consumo kWh nesse layout.

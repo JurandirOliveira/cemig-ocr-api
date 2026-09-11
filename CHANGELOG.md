@@ -1,3 +1,11 @@
+
+## 1.0.0-RC11
+
+- Ajuste da regra de validação do valor:
+  - com linha digitável/código de barras: valida somente quando topo, rodapé e código são iguais;
+  - sem linha digitável/código de barras: valida quando topo e rodapé são iguais.
+- Mantido o OCR, parser de campos e integração Survey123.
+
 # Changelog
 
 ## 1.0.0-RC9

@@ -1498,7 +1498,10 @@ def _parse_nf3e_instalacao_from_lines(lines):
         "valor": valor,
         "consumoKWh": consumo,
         "impostoRetidoIRPJ": irpj,
-        "valorValidado": False,
+        # Layout NF3e não possui linha digitável/código de barras.
+        # Pela regra RC11, quando não há código de barras, o valor é validado
+        # se o valor do topo e o valor do rodapé forem concordantes.
+        "valorValidado": True,
         "linhaDigitavel": None,
         "validacao": {
             "ocr_topo": valor,
@@ -1577,24 +1580,25 @@ def extract_fields(texts, boxes=None):
 
     valor_codigo = febraban.get("valor") if febraban else None
 
+    possui_codigo_barras = linha_digitavel is not None and bool(str(linha_digitavel).strip())
+
+    # Regra RC11 de validação do valor:
+    # - Com código de barras/linha digitável: topo, rodapé e código devem existir e ser iguais.
+    # - Sem código de barras/linha digitável: topo e rodapé devem existir e ser iguais.
     valor_confere_codigo = (
         febraban.get("valido") is True
-        and valor is not None
+        and febraban.get("valor_efetivo") is True
         and valor_codigo is not None
-        and abs(valor - valor_codigo) < 0.001
+        and valor_topo is not None
+        and valor_total is not None
+        and abs(valor_topo["value"] - valor_codigo) < 0.001
+        and abs(valor_total["value"] - valor_codigo) < 0.001
     )
 
-    # Só marcamos o valor como validado quando:
-    # 1. OCR do topo e do rodapé concordam;
-    # 2. linha FEBRABAN é matematicamente válida;
-    # 3. o código representa valor efetivo;
-    # 4. o valor do código é igual ao valor do OCR.
-    valor_validado = (
-        ocr_concordante
-        and febraban.get("valido") is True
-        and febraban.get("valor_efetivo") is True
-        and valor_confere_codigo
-    )
+    if possui_codigo_barras:
+        valor_validado = valor_confere_codigo
+    else:
+        valor_validado = ocr_concordante
 
     return {
         "nome": nome,

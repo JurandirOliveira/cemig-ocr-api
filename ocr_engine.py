@@ -1518,6 +1518,434 @@ def _parse_nf3e_instalacao_from_lines(lines):
     }
 
 
+
+# ----------------------------------------------------------------------
+# RC13 - Parser dedicado para Fatura CEMIG SIM / Geração Distribuída
+# ----------------------------------------------------------------------
+MESES_PT_PARA_ABREV = {
+    "JANEIRO": "JAN", "FEVEREIRO": "FEV", "MARCO": "MAR", "MARÇO": "MAR",
+    "ABRIL": "ABR", "MAIO": "MAI", "JUNHO": "JUN", "JULHO": "JUL",
+    "AGOSTO": "AGO", "SETEMBRO": "SET", "OUTUBRO": "OUT", "NOVEMBRO": "NOV", "DEZEMBRO": "DEZ",
+    "JAN": "JAN", "FEV": "FEV", "MAR": "MAR", "ABR": "ABR", "MAI": "MAI", "JUN": "JUN",
+    "JUL": "JUL", "AGO": "AGO", "SET": "SET", "OUT": "OUT", "NOV": "NOV", "DEZ": "DEZ",
+}
+
+
+def _remover_acentos_sim(txt: str) -> str:
+    return (
+        str(txt or "")
+        .replace("Á", "A").replace("À", "A").replace("Â", "A").replace("Ã", "A")
+        .replace("É", "E").replace("Ê", "E")
+        .replace("Í", "I")
+        .replace("Ó", "O").replace("Ô", "O").replace("Õ", "O")
+        .replace("Ú", "U")
+        .replace("Ç", "C")
+        .replace("á", "a").replace("à", "a").replace("â", "a").replace("ã", "a")
+        .replace("é", "e").replace("ê", "e")
+        .replace("í", "i")
+        .replace("ó", "o").replace("ô", "o").replace("õ", "o")
+        .replace("ú", "u")
+        .replace("ç", "c")
+    )
+
+
+def normalizar_referencia_mes(valor: str | None):
+    """Normaliza 'Agosto/2026' e 'AGO/2026' para 'AGO/2026' para comparação."""
+    if not valor:
+        return None
+    txt = normalize_text(valor).strip()
+    m = re.search(r"([A-Za-zÀ-ÿ]{3,12})\s*/\s*(20\d{2})", txt, re.IGNORECASE)
+    if not m:
+        return txt.upper()
+    mes = _remover_acentos_sim(m.group(1)).upper()
+    ano = m.group(2)
+    abrev = MESES_PT_PARA_ABREV.get(mes, mes[:3])
+    return f"{abrev}/{ano}"
+
+
+def normalizar_unidade_consumidora(valor: str | None):
+    """Remove pontuação para comparação de unidades/instalações."""
+    if not valor:
+        return None
+    digitos = re.sub(r"\D+", "", str(valor))
+    return digitos or None
+
+
+def _parse_numero_br(valor: str | None):
+    if valor is None:
+        return None
+    raw = str(valor).strip()
+    if not raw:
+        return None
+    raw = raw.replace("R$", "").replace("%", "").strip()
+    raw = raw.replace(".", "").replace(",", ".")
+    try:
+        return float(raw)
+    except Exception:
+        return None
+
+
+def _numeros_br(texto: str):
+    """Retorna números em formato brasileiro, preservando decimais longos como 0,96538788."""
+    vals = []
+    for m in re.finditer(r"(?<![\d.,-])-?\d{1,3}(?:\.\d{3})*(?:,\d+)?|-?\d+(?:,\d+)?", str(texto or "")):
+        raw = m.group(0)
+        # Ignora anos soltos em textos mistos quando possível; o chamador escolhe por contexto.
+        parsed = _parse_numero_br(raw)
+        if parsed is not None:
+            vals.append({"raw": raw, "value": parsed, "start": m.start(), "end": m.end()})
+    return vals
+
+
+def _primeiro_numero_br(texto: str):
+    nums = _numeros_br(texto)
+    return nums[0]["value"] if nums else None
+
+
+def _ultimo_numero_br(texto: str):
+    nums = _numeros_br(texto)
+    return nums[-1]["value"] if nums else None
+
+
+def _valor_apos_rotulo_linha(lines, rotulo: str):
+    rot_norm = _remover_acentos_sim(rotulo).upper()
+    for i, line in enumerate(lines):
+        line_norm = _remover_acentos_sim(line).upper()
+        if rot_norm in line_norm:
+            # Valor na mesma linha após ':'
+            if ":" in line:
+                after = line.split(":", 1)[1].strip()
+                if after:
+                    return after
+            # Ou nas próximas linhas.
+            for j in range(i + 1, min(len(lines), i + 5)):
+                candidato = normalize_text(lines[j])
+                if candidato:
+                    return candidato
+    return None
+
+
+def _valor_vizinho_sim(lines, rotulo: str, preferir: str = "next"):
+    """Lê valor perto de rótulos da SIM.
+
+    No PDF direto, alguns blocos vêm invertidos: o valor aparece na linha anterior
+    e o rótulo na linha seguinte, por exemplo ': MUNICIPIO...' antes de 'Razão Social'.
+    """
+    rot_norm = _remover_acentos_sim(rotulo).upper()
+    rotulos_stop = (
+        "RAZAO SOCIAL", "CNPJ", "ENDERECO DA INSTALACAO", "PLANO CONTRATADO",
+        "PERCENTUAL CONTRATADO", "REFERENCIA PARA CONTRATACAO", "MES DE REFERENCIA",
+        "DATA DE EMISSAO", "N° DO DOCUMENTO", "Nº DO DOCUMENTO", "N DA UNIDADE",
+        "CONSUMIDORA", "VALOR TOTAL", "VENCIMENTO"
+    )
+
+    def limpa(v):
+        v = normalize_text(v).strip()
+        if v.startswith(":"):
+            v = v[1:].strip()
+        return v or None
+
+    def candidato_valido(v):
+        if not v:
+            return None
+        vv = limpa(v)
+        if not vv:
+            return None
+        vv_norm = _remover_acentos_sim(vv).upper()
+        if vv_norm in rotulos_stop:
+            return None
+        if any(vv_norm == r for r in rotulos_stop):
+            return None
+        return vv
+
+    for i, line in enumerate(lines):
+        line_norm = _remover_acentos_sim(line).upper()
+        if rot_norm not in line_norm:
+            continue
+
+        # Valor na mesma linha após ':'
+        if ":" in line:
+            after = limpa(line.split(":", 1)[1])
+            if after:
+                return after
+
+        direcoes = ("prev", "next") if preferir == "prev" else ("next", "prev")
+        for direcao in direcoes:
+            if direcao == "prev":
+                for j in range(i - 1, max(-1, i - 5), -1):
+                    cand = candidato_valido(lines[j])
+                    if cand:
+                        return cand
+            else:
+                for j in range(i + 1, min(len(lines), i + 5)):
+                    cand = candidato_valido(lines[j])
+                    if cand:
+                        return cand
+    return None
+
+
+def _data_apos_rotulo_linha(lines, rotulo: str):
+    rot_norm = _remover_acentos_sim(rotulo).upper()
+    for i, line in enumerate(lines):
+        line_norm = _remover_acentos_sim(line).upper()
+        if rot_norm in line_norm:
+            janela = " ".join(lines[i:min(len(lines), i + 5)])
+            m = re.search(r"\b\d{2}/\d{2}/\d{4}\b", janela)
+            if m:
+                return m.group(0)
+    return None
+
+
+def _money_value_from_text(texto: str):
+    parsed = parse_money(str(texto or ""))
+    return parsed["value"] if parsed else None
+
+
+def _extrair_endereco_sim(lines):
+    for i, line in enumerate(lines):
+        u = _remover_acentos_sim(line).upper()
+        if "ENDERE" in u and "INSTALA" in u:
+            partes = []
+            # PDF direto pode trazer o endereço antes do rótulo.
+            if i > 0:
+                prev = normalize_text(lines[i - 1]).strip()
+                if prev.startswith(":"):
+                    partes.append(prev[1:].strip())
+            if ":" in line:
+                after = line.split(":", 1)[1].strip()
+                if after:
+                    partes.append(after)
+            for j in range(i + 1, min(len(lines), i + 4)):
+                prox = normalize_text(lines[j])
+                prox_norm = _remover_acentos_sim(prox).upper()
+                if not prox:
+                    continue
+                if any(stop in prox_norm for stop in ["COMUNIDADE SOLAR", "PLANO CONTRATADO", "CNPJ", "RAZAO SOCIAL", "RAZÃO SOCIAL", "N° DA UNIDADE", "Nº DA UNIDADE"]):
+                    break
+                partes.append(prox)
+            endereco = " ".join(partes).strip(" ,")
+            return normalize_text(endereco) if endereco else None
+    return None
+
+
+def _extrair_unidade_sim(lines):
+    for i, line in enumerate(lines):
+        janela = " ".join(lines[i:min(len(lines), i + 5)])
+        u = _remover_acentos_sim(janela).upper()
+        if "UNIDADE" in u and "CONSUMID" in u:
+            # Evita pegar CNPJ; unidade SIM costuma estar no bloco com N° da unidade consumidora.
+            candidatos = re.findall(r"\b\d{1,3}(?:\.\d{3}){1,3}-\d{2}\b|\b\d{6,15}\b", janela)
+            if candidatos:
+                return candidatos[-1]
+    return None
+
+
+def _extrair_item_sim(lines, descricao: str):
+    desc_norm = _remover_acentos_sim(descricao).upper()
+    for i, line in enumerate(lines):
+        u = _remover_acentos_sim(line).upper()
+        if desc_norm in u:
+            janela = " ".join(lines[i:min(len(lines), i + 3)])
+            nums = _numeros_br(janela)
+            if nums:
+                return nums[0]["value"]
+    return None
+
+
+def _extrair_item_compensada_sim(lines):
+    for i, line in enumerate(lines):
+        u = _remover_acentos_sim(line).upper()
+        if "ENERGIA COMPENSADA" in u:
+            janela = " ".join(lines[i:min(len(lines), i + 5)])
+            nums = _numeros_br(janela)
+            # Linha esperada: Energia Compensada 169,00 R$ 0,96538788 R$ 163,15
+            return {
+                "quantidade": nums[0]["value"] if len(nums) >= 1 else None,
+                "valor_unitario": nums[1]["value"] if len(nums) >= 2 else None,
+                "valor_total": nums[2]["value"] if len(nums) >= 3 else None,
+            }
+    return {"quantidade": None, "valor_unitario": None, "valor_total": None}
+
+
+def _extrair_economia_co2_sim(texto_completo: str):
+    economia = None
+    co2 = None
+    m = re.search(r"economizou\s*R\$\s*([\d\.]+,\d{2})", texto_completo, re.IGNORECASE)
+    if m:
+        economia = _parse_numero_br(m.group(1))
+    m = re.search(r"(?:emiti[ru]|emitir)\s*(\d+(?:,\d+)?)\s*kg\s*de\s*CO", texto_completo, re.IGNORECASE)
+    if not m:
+        m = re.search(r"(\d+(?:,\d+)?)\s*kg\b", texto_completo, re.IGNORECASE)
+    if m:
+        co2 = _parse_numero_br(m.group(1))
+    return economia, co2
+
+
+def _parse_cemig_sim_from_lines(lines):
+    lines = [normalize_text(l) for l in (lines or []) if normalize_text(l)]
+    texto = "\n".join(lines)
+    texto_norm = _remover_acentos_sim(texto).upper()
+
+    sinais = ["CEMIG SIM", "COMUNIDADE SOLAR", "PLANO CONTRATADO", "ENERGIA COMPENSADA", "SALDO GERADO NO MES"]
+    if sum(1 for s in sinais if s in texto_norm) < 2:
+        return None
+
+    razao_social = _valor_vizinho_sim(lines, "Razão Social", preferir="prev")
+    cnpj = _valor_vizinho_sim(lines, "CNPJ", preferir="prev")
+    endereco = _extrair_endereco_sim(lines)
+    unidade = _extrair_unidade_sim(lines)
+    mes_ref_original = _valor_vizinho_sim(lines, "Mês de referência", preferir="next")
+    mes_ref_canonico = normalizar_referencia_mes(mes_ref_original)
+    numero_documento = _valor_vizinho_sim(lines, "N° do documento", preferir="next") or _valor_vizinho_sim(lines, "Nº do documento", preferir="next")
+    data_emissao = _data_apos_rotulo_linha(lines, "Data de emissão")
+    plano_contratado = _valor_vizinho_sim(lines, "Plano contratado", preferir="prev")
+    percentual = _primeiro_numero_br(_valor_vizinho_sim(lines, "Percentual contratado", preferir="prev") or "")
+    ref_contratacao = _primeiro_numero_br(_valor_vizinho_sim(lines, "Referência para contratação", preferir="prev") or "")
+
+    energia_gerada = _extrair_item_sim(lines, "Energia Gerada")
+    compensada = _extrair_item_compensada_sim(lines)
+    saldo_mes = _extrair_item_sim(lines, "Saldo Gerado no mês")
+    saldo_acumulado = _extrair_item_sim(lines, "Saldo Acumulado")
+
+    vencimento = _data_apos_rotulo_linha(lines, "Vencimento")
+    valor_total_bloco = _money_value_from_text(_valor_apos_rotulo_linha(lines, "Valor Total") or "")
+    valor_total = valor_total_bloco if valor_total_bloco is not None else compensada.get("valor_total")
+    economia, co2 = _extrair_economia_co2_sim(texto)
+
+    if not (razao_social or unidade or mes_ref_original or valor_total is not None):
+        return None
+
+    return {
+        "layout": "cemig_sim",
+        "razaoSocial": razao_social,
+        "cnpj": cnpj,
+        "enderecoInstalacao": endereco,
+        "unidadeConsumidora": unidade,
+        "unidadeConsumidoraNormalizada": normalizar_unidade_consumidora(unidade),
+        "mesReferencia": mes_ref_original,
+        "mesReferenciaCanonica": mes_ref_canonico,
+        "numeroDocumento": numero_documento,
+        "dataEmissao": data_emissao,
+        "planoContratado": plano_contratado,
+        "percentualContratado": percentual,
+        "referenciaContratacaoKwh": ref_contratacao,
+        "energiaGeradaKwh": energia_gerada,
+        "energiaCompensadaKwh": compensada.get("quantidade"),
+        "saldoGeradoMesKwh": saldo_mes,
+        "saldoAcumuladoKwh": saldo_acumulado,
+        "valorUnitario": compensada.get("valor_unitario"),
+        "valorTotal": valor_total,
+        "dataVencimento": vencimento,
+        "economiaValor": economia,
+        "co2EvitadoKg": co2,
+        "status": "Processado",
+    }
+
+
+def extract_pdf_text_layout_sim(input_path: Path):
+    """Extração direta de texto para PDF digital da fatura CEMIG SIM."""
+    if Path(input_path).suffix.lower() != ".pdf":
+        return None
+    try:
+        doc = fitz.open(str(input_path))
+        texto = "\n".join(page.get_text("text") for page in doc)
+        doc.close()
+    except Exception as exc:
+        print(f"[PDF TEXT RC13 SIM] falha ao extrair texto direto: {type(exc).__name__}: {exc}", flush=True)
+        return None
+
+    lines = [normalize_text(line) for line in texto.splitlines() if normalize_text(line)]
+    resultado = _parse_cemig_sim_from_lines(lines)
+    if resultado:
+        print(
+            f"[PDF TEXT RC13 SIM] layout CEMIG SIM reconhecido razao={resultado.get('razaoSocial')} "
+            f"uc={resultado.get('unidadeConsumidora')} ref={resultado.get('mesReferencia')} "
+            f"valor={resultado.get('valorTotal')}",
+            flush=True,
+        )
+    return resultado
+
+
+def process_document_sim(input_path: Path, ocr=None, save_debug: bool = False):
+    """Processa a segunda fatura do fluxo GD: CEMIG SIM."""
+    input_path = Path(input_path)
+    if not input_path.exists():
+        raise FileNotFoundError(f"Arquivo não encontrado: {input_path}")
+    if input_path.suffix.lower() not in {".jpg", ".jpeg", ".png", ".pdf"}:
+        raise ValueError("Formato não suportado. Use JPG, JPEG, PNG ou PDF.")
+
+    total_start = time.perf_counter()
+
+    if input_path.suffix.lower() == ".pdf":
+        t0 = time.perf_counter()
+        direto = extract_pdf_text_layout_sim(input_path)
+        direct_time = time.perf_counter() - t0
+        if direto is not None:
+            return direto, {
+                "preparacao_imagem_s": round(direct_time, 4),
+                "inferencia_ocr_s": 0.0,
+                "parser_sim_s": 0.0,
+                "total_s": round(time.perf_counter() - total_start, 4),
+                "imagem": {
+                    "tipo": "pdf_text_direto_sim",
+                    "redimensionada": False,
+                    "dimensoes_originais": None,
+                    "dimensoes_processadas": None,
+                },
+            }
+
+    if ocr is None:
+        raise RuntimeError("OCR necessário para processar esta fatura CEMIG SIM; extração direta de PDF não foi suficiente.")
+
+    temp_ocr_path = None
+    try:
+        t0 = time.perf_counter()
+        ocr_image_path, temp_ocr_path, prep_metadata = prepare_ocr_image(input_path)
+        preparation_time = time.perf_counter() - t0
+
+        t0 = time.perf_counter()
+        pages = list(ocr.predict(str(ocr_image_path)))
+        inference_time = time.perf_counter() - t0
+        if not pages:
+            raise RuntimeError("Nenhum resultado retornado pelo PaddleOCR para a fatura CEMIG SIM.")
+
+        page = pages[0]
+        data = page.json["res"] if hasattr(page, "json") else page["res"]
+        texts = [normalize_text(t) for t in data["rec_texts"]]
+
+        t0 = time.perf_counter()
+        extracted = _parse_cemig_sim_from_lines(texts)
+        if extracted is None:
+            raise RuntimeError("Layout CEMIG SIM não reconhecido no OCR.")
+        parser_time = time.perf_counter() - t0
+
+        timings = {
+            "preparacao_imagem_s": round(preparation_time, 4),
+            "inferencia_ocr_s": round(inference_time, 4),
+            "parser_sim_s": round(parser_time, 4),
+            "total_s": round(time.perf_counter() - total_start, 4),
+            "imagem": prep_metadata,
+        }
+
+        if save_debug:
+            safe_stem = re.sub(r"[^A-Za-z0-9_-]+", "_", input_path.stem)
+            (OUTPUT_DIR / f"{safe_stem}_sim_ocr.txt").write_text(
+                "\n".join(f"{i:03d} {t}" for i, t in enumerate(texts, start=1)),
+                encoding="utf-8"
+            )
+            (OUTPUT_DIR / f"{safe_stem}_sim_resultado.json").write_text(
+                json.dumps(extracted, ensure_ascii=False, indent=2),
+                encoding="utf-8"
+            )
+
+        return extracted, timings
+    finally:
+        if temp_ocr_path is not None:
+            try:
+                temp_ocr_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
 def extract_pdf_text_layout(input_path: Path):
     """Fallback sem OCR para PDFs digitais CEMIG/NF3e."""
     if Path(input_path).suffix.lower() != ".pdf":

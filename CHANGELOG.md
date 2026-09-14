@@ -1,5 +1,13 @@
 # CEMIG OCR API
 
+## 1.0.0-RC12.1 - Diagnóstico detalhado de anexos GD / CEMIG SIM
+
+- Mantém o OCR da conta CEMIG principal igual à RC12/RC11.
+- Adiciona log detalhado, seguro e mascarado da estrutura real dos anexos enviados pelo Survey123.
+- Registra chaves, tipos, caminhos relevantes, campos do formulário e previews curtos de `feature.attachments`.
+- Objetivo: identificar exatamente como o segundo campo de anexo `fatura_cemig_sim` chega no payload antes de implementar o OCR da fatura SIM.
+- Ainda não processa a fatura CEMIG SIM.
+
 ## 1.0.0-RC12 - Diagnóstico GD / CEMIG SIM
 
 - Mantém o OCR da conta CEMIG principal igual à RC11.

@@ -16,9 +16,9 @@ from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Request, Resp
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(
-    title="CEMIG OCR API - Survey123 RC10",
-    version="1.0.0-RC11",
-    description="CEMIG OCR API RC10: suporte ao layout NF3e eletrônico e consumo kWh.",
+    title="CEMIG OCR API - Survey123 RC12",
+    version="1.0.0-RC12",
+    description="CEMIG OCR API RC12: diagnóstico GD/SIM no webhook Survey123.",
 )
 
 app.add_middleware(
@@ -60,8 +60,8 @@ def erro_payload(etapa: str, exc: Exception, inicio: float):
 def raiz():
     return {
         "status": "ok",
-        "versao": "1.0.0-RC11",
-        "mensagem": "FastAPI iniciou sem carregar Paddle/PaddleOCR.",
+        "versao": "1.0.0-RC12",
+        "mensagem": "FastAPI iniciou sem carregar Paddle/PaddleOCR. RC12 com diagnóstico GD/SIM.",
     }
 
 
@@ -69,7 +69,7 @@ def raiz():
 def health():
     return {
         "status": "ok",
-        "versao": "1.0.0-RC11",
+        "versao": "1.0.0-RC12",
         "ocr_fast_carregado": OCR_FAST is not None,
         "ocr_robusto_carregado": OCR_ROBUSTO is not None,
         "ambiente": ambiente(),
@@ -131,7 +131,7 @@ async def ocr_conta_cemig(arquivo: UploadFile = File(...)):
 
         return {
             "sucesso": True,
-            "versao": "1.0.0-RC11",
+            "versao": "1.0.0-RC12",
             "arquivo": nome,
             "roteamento": roteamento,
             "resultado": resultado,
@@ -456,6 +456,145 @@ def _extrair_info_survey123(payload: dict):
     }
 
 
+
+
+def _obter_atributos_survey123(payload: dict):
+    """Retorna os atributos do registro enviado pelo Survey123."""
+    try:
+        attrs = ((payload.get("feature") or {}).get("attributes") or {})
+        return attrs if isinstance(attrs, dict) else {}
+    except Exception:
+        return {}
+
+
+def _ler_campo_formulario(payload: dict, *nomes):
+    """Lê um campo do formulário ignorando diferença de maiúsculas/minúsculas."""
+    attrs = _obter_atributos_survey123(payload)
+    if not attrs:
+        return None
+    mapa = {str(k).lower(): v for k, v in attrs.items()}
+    for nome in nomes:
+        if nome and str(nome).lower() in mapa:
+            return mapa[str(nome).lower()]
+    return None
+
+
+def _normalizar_sim_nao(valor):
+    """Converte respostas comuns de Survey123 para True/False quando possível."""
+    if valor is None:
+        return None
+    if isinstance(valor, bool):
+        return valor
+    texto = str(valor).strip().lower()
+    texto = (
+        texto.replace("ã", "a")
+        .replace("á", "a")
+        .replace("à", "a")
+        .replace("â", "a")
+        .replace("é", "e")
+        .replace("ê", "e")
+        .replace("í", "i")
+        .replace("ó", "o")
+        .replace("ô", "o")
+        .replace("ú", "u")
+        .replace("ç", "c")
+    )
+    if texto in {"sim", "s", "yes", "y", "true", "1"}:
+        return True
+    if texto in {"nao", "n", "no", "false", "0"}:
+        return False
+    return None
+
+
+def _resumir_anexos_survey123(anexos):
+    """Resumo seguro dos anexos, sem URL e sem token, para diagnosticar o payload."""
+    resumo = []
+    for i, anexo in enumerate(anexos or []):
+        if not isinstance(anexo, dict):
+            continue
+        resumo.append(
+            {
+                "i": i,
+                "campo": anexo.get("campo"),
+                "name": anexo.get("name"),
+                "contentType": anexo.get("contentType"),
+                "size": anexo.get("size"),
+                "id": anexo.get("id") or anexo.get("attachmentId") or anexo.get("objectId"),
+                "keywords": anexo.get("keywords"),
+                "url_presente": bool(anexo.get("url")),
+            }
+        )
+    return resumo
+
+
+def _campo_anexo_normalizado(anexo: dict):
+    bruto = anexo.get("campo") or anexo.get("keywords") or ""
+    return str(bruto).strip().lower()
+
+
+def _nome_anexo_normalizado(anexo: dict):
+    return str(anexo.get("name") or "").strip().lower()
+
+
+def _parece_anexo_sim(anexo: dict):
+    campo = _campo_anexo_normalizado(anexo)
+    nome = _nome_anexo_normalizado(anexo)
+    return (
+        campo in {"fatura_cemig_sim", "conta_cemig_sim", "fatura_sim", "cemig_sim", "sim"}
+        or "cemig_sim" in campo
+        or "fatura_sim" in campo
+        or "conta_sim" in campo
+        or "cemig sim" in nome
+        or "cemig_sim" in nome
+        or "fatura_sim" in nome
+    )
+
+
+def _selecionar_anexos_gd_survey123(anexos):
+    """Seleciona anexo principal e anexo SIM sem processar a SIM ainda.
+
+    A conta principal continua sendo processada como antes. A fatura SIM é apenas
+    localizada e registrada em log nesta RC12, para confirmar o formato do payload.
+    """
+    anexos = [a for a in (anexos or []) if isinstance(a, dict)]
+    campos_principal = {
+        "conta",
+        "conta_cemig",
+        "fatura_cemig",
+        "foto_conta",
+        "anexo_conta",
+        "arquivo_conta",
+    }
+
+    anexo_sim = None
+    for anexo in anexos:
+        if _parece_anexo_sim(anexo):
+            anexo_sim = anexo
+            break
+
+    anexo_principal = None
+    for anexo in anexos:
+        campo = _campo_anexo_normalizado(anexo)
+        if campo in campos_principal and not _parece_anexo_sim(anexo):
+            anexo_principal = anexo
+            break
+
+    if anexo_principal is None:
+        for anexo in anexos:
+            if not _parece_anexo_sim(anexo):
+                anexo_principal = anexo
+                break
+
+    if anexo_principal is None and anexos:
+        anexo_principal = anexos[0]
+
+    return {
+        "principal": anexo_principal,
+        "sim": anexo_sim,
+        "principal_campo": _campo_anexo_normalizado(anexo_principal) if anexo_principal else None,
+        "sim_campo": _campo_anexo_normalizado(anexo_sim) if anexo_sim else None,
+    }
+
 def _adicionar_token_url(url: str, token: str | None):
     if not token:
         return url
@@ -481,7 +620,7 @@ def _baixar_anexo_survey123(anexo: dict, token: str | None) -> Path:
     os.close(fd)
     caminho = Path(nome_tmp)
 
-    req = urllib.request.Request(url_download, headers={"User-Agent": "cemig-ocr-api/1.0.0-RC11"})
+    req = urllib.request.Request(url_download, headers={"User-Agent": "cemig-ocr-api/1.0.0-RC12"})
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
             dados = resp.read(MAX_UPLOAD_BYTES + 1)
@@ -504,7 +643,7 @@ def _baixar_anexo_survey123(anexo: dict, token: str | None) -> Path:
 def _arcgis_request_json(url: str, params: dict | None = None, timeout: int = 60):
     query = urllib.parse.urlencode(params or {})
     url_final = url + (("&" if "?" in url else "?") + query if query else "")
-    req = urllib.request.Request(url_final, headers={"User-Agent": "cemig-ocr-api/1.0.0-RC11"})
+    req = urllib.request.Request(url_final, headers={"User-Agent": "cemig-ocr-api/1.0.0-RC12"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             texto = resp.read().decode("utf-8", errors="replace")
@@ -526,7 +665,7 @@ def _arcgis_post_form_json(url: str, data: dict, timeout: int = 90):
         url,
         data=encoded,
         headers={
-            "User-Agent": "cemig-ocr-api/1.0.0-RC11",
+            "User-Agent": "cemig-ocr-api/1.0.0-RC12",
             "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
         },
         method="POST",
@@ -631,7 +770,7 @@ def _mapear_resultado_para_feature(resultado: dict, roteamento: dict, tempos: di
         "valor_validado": resultado.get("valorValidado"),
         "motor": roteamento.get("motor_escolhido") or roteamento.get("motor"),
         "tempo_processamento": tempos.get("total_s"),
-        "versao_api": "1.0.0-RC11",
+        "versao_api": "1.0.0-RC12",
         "status": "Processado",
     }
 
@@ -720,26 +859,61 @@ def _processar_survey123_em_background(payload: dict, meta: dict | None = None):
         layer_id = info.get("layerId")
         service_url = info.get("featureServiceUrl")
 
+        eh_gd_raw = _ler_campo_formulario(payload, "eh_gd", "geracao_distribuida", "conta_gd")
+        eh_gd = _normalizar_sim_nao(eh_gd_raw)
+        resumo_anexos = _resumir_anexos_survey123(anexos)
+
         print(
-            f"[SURVEY123 RC10] início objectId={object_id} globalId={global_id} "
-            f"layerId={layer_id} anexos={len(anexos)} bytes={meta.get('body_bytes')}",
+            f"[SURVEY123 RC12] início objectId={object_id} globalId={global_id} "
+            f"layerId={layer_id} eh_gd_raw={eh_gd_raw!r} eh_gd={eh_gd} "
+            f"anexos={len(anexos)} bytes={meta.get('body_bytes')}",
+            flush=True,
+        )
+        print(
+            f"[SURVEY123 RC12] anexos_payload objectId={object_id} "
+            f"resumo={json.dumps(resumo_anexos, ensure_ascii=False)}",
             flush=True,
         )
 
         if not anexos:
-            print(f"[SURVEY123 RC10] erro objectId={object_id}: nenhum anexo encontrado", flush=True)
+            print(f"[SURVEY123 RC12] erro objectId={object_id}: nenhum anexo encontrado", flush=True)
             return
 
-        anexo = anexos[0]
+        selecao_anexos = _selecionar_anexos_gd_survey123(anexos)
+        anexo = selecao_anexos.get("principal")
+        anexo_sim = selecao_anexos.get("sim")
+
         print(
-            f"[SURVEY123 RC10] baixando anexo objectId={object_id} "
+            f"[SURVEY123 RC12] selecao_anexos objectId={object_id} "
+            f"principal_campo={selecao_anexos.get('principal_campo')} "
+            f"principal_nome={anexo.get('name') if anexo else None} "
+            f"sim_encontrada={bool(anexo_sim)} "
+            f"sim_campo={selecao_anexos.get('sim_campo')} "
+            f"sim_nome={anexo_sim.get('name') if anexo_sim else None}",
+            flush=True,
+        )
+
+        if eh_gd is True and not anexo_sim:
+            print(
+                f"[SURVEY123 RC12] alerta_gd objectId={object_id}: "
+                "formulário marcou GD=Sim, mas a fatura CEMIG SIM não foi localizada no payload",
+                flush=True,
+            )
+
+        if not anexo:
+            print(f"[SURVEY123 RC12] erro objectId={object_id}: anexo principal não localizado", flush=True)
+            return
+
+        print(
+            f"[SURVEY123 RC12] baixando anexo principal objectId={object_id} "
+            f"campo={selecao_anexos.get('principal_campo')} "
             f"nome={anexo.get('name')} tipo={anexo.get('contentType')} tamanho={anexo.get('size')}",
             flush=True,
         )
 
         caminho = _baixar_anexo_survey123(anexo, info.get("portalToken"))
         tamanho = caminho.stat().st_size
-        print(f"[SURVEY123 RC10] anexo baixado objectId={object_id} bytes={tamanho}", flush=True)
+        print(f"[SURVEY123 RC12] anexo baixado objectId={object_id} bytes={tamanho}", flush=True)
 
         inicio_ocr = time.perf_counter()
         motor, roteamento = _obter_motor_para_documento(caminho)
@@ -754,7 +928,7 @@ def _processar_survey123_em_background(payload: dict, meta: dict | None = None):
         )
 
         print(
-            f"[SURVEY123 RC10] processado objectId={object_id} "
+            f"[SURVEY123 RC12] processado objectId={object_id} "
             f"nome={resultado.get('nome')} ref={resultado.get('referencia')} "
             f"valor={resultado.get('valor')} validado={resultado.get('valorValidado')} "
             f"motor={roteamento.get('motor_escolhido') or roteamento.get('motor')} "
@@ -765,7 +939,7 @@ def _processar_survey123_em_background(payload: dict, meta: dict | None = None):
 
     except Exception as exc:
         print(
-            f"[SURVEY123 RC10] erro objectId={info.get('objectId') if isinstance(info, dict) else None}: "
+            f"[SURVEY123 RC12] erro objectId={info.get('objectId') if isinstance(info, dict) else None}: "
             f"{type(exc).__name__}: {exc}",
             flush=True,
         )
@@ -791,11 +965,20 @@ async def survey123_webhook(request: Request, background_tasks: BackgroundTasks)
 
     info = _extrair_info_survey123(payload)
     anexos = info.get("attachments") or []
+    eh_gd_raw = _ler_campo_formulario(payload, "eh_gd", "geracao_distribuida", "conta_gd")
+    eh_gd = _normalizar_sim_nao(eh_gd_raw)
+    resumo_anexos = _resumir_anexos_survey123(anexos)
 
     print(
-        f"[SURVEY123 RC10] recebido objectId={info.get('objectId')} "
+        f"[SURVEY123 RC12] recebido objectId={info.get('objectId')} "
         f"globalId={info.get('globalId')} layerId={info.get('layerId')} "
+        f"eh_gd_raw={eh_gd_raw!r} eh_gd={eh_gd} "
         f"anexos={len(anexos)} body_bytes={len(body)}",
+        flush=True,
+    )
+    print(
+        f"[SURVEY123 RC12] anexos_recebidos objectId={info.get('objectId')} "
+        f"resumo={json.dumps(resumo_anexos, ensure_ascii=False)}",
         flush=True,
     )
 
@@ -807,10 +990,13 @@ async def survey123_webhook(request: Request, background_tasks: BackgroundTasks)
 
     return {
         "status": "accepted",
-        "versao": "1.0.0-RC11",
+        "versao": "1.0.0-RC12",
         "mensagem": "Webhook recebido. Processamento OCR iniciado em background.",
         "objectId": info.get("objectId"),
         "globalId": info.get("globalId"),
         "attachments": len(anexos),
+        "eh_gd_raw": eh_gd_raw,
+        "eh_gd": eh_gd,
+        "anexos_resumo": resumo_anexos,
         "tempo_resposta_s": round(time.perf_counter() - inicio, 4),
     }

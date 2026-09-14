@@ -1,3 +1,13 @@
+# CEMIG OCR API
+
+## 1.0.0-RC12 - Diagnóstico GD / CEMIG SIM
+
+- Mantém o OCR da conta CEMIG principal igual à RC11.
+- Adiciona diagnóstico no webhook Survey123 para ler o campo `eh_gd`.
+- Lista nos logs os anexos recebidos por campo, sem expor URL nem token.
+- Seleciona o anexo principal separadamente da possível fatura `fatura_cemig_sim`.
+- Ainda não processa a fatura CEMIG SIM; esta versão confirma o payload antes do parser SIM.
+
 
 ## 1.0.0-RC11
 

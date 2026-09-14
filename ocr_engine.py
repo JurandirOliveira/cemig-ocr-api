@@ -1530,6 +1530,24 @@ MESES_PT_PARA_ABREV = {
     "JUL": "JUL", "AGO": "AGO", "SET": "SET", "OUT": "OUT", "NOV": "NOV", "DEZ": "DEZ",
 }
 
+# RC13.1: usado apenas para comparação interna entre a conta CEMIG comum
+# e a fatura CEMIG SIM. Os campos exibidos no Survey continuam preservando
+# o texto original extraído de cada fatura.
+MESES_PT_PARA_NUM = {
+    "JANEIRO": "01", "JAN": "01",
+    "FEVEREIRO": "02", "FEV": "02",
+    "MARCO": "03", "MARÇO": "03", "MAR": "03",
+    "ABRIL": "04", "ABR": "04",
+    "MAIO": "05", "MAI": "05",
+    "JUNHO": "06", "JUN": "06",
+    "JULHO": "07", "JUL": "07",
+    "AGOSTO": "08", "AGO": "08",
+    "SETEMBRO": "09", "SET": "09",
+    "OUTUBRO": "10", "OUT": "10",
+    "NOVEMBRO": "11", "NOV": "11",
+    "DEZEMBRO": "12", "DEZ": "12",
+}
+
 
 def _remover_acentos_sim(txt: str) -> str:
     return (
@@ -1550,17 +1568,51 @@ def _remover_acentos_sim(txt: str) -> str:
 
 
 def normalizar_referencia_mes(valor: str | None):
-    """Normaliza 'Agosto/2026' e 'AGO/2026' para 'AGO/2026' para comparação."""
+    """Normaliza referências mensais para comparação interna.
+
+    Exemplos equivalentes:
+      - AGO/2026
+      - Agosto/2026
+      - AGOSTO DE 2026
+      - 08/2026
+
+    Todos retornam o mesmo valor canônico: 2026-08.
+    """
     if not valor:
         return None
-    txt = normalize_text(valor).strip()
-    m = re.search(r"([A-Za-zÀ-ÿ]{3,12})\s*/\s*(20\d{2})", txt, re.IGNORECASE)
-    if not m:
-        return txt.upper()
-    mes = _remover_acentos_sim(m.group(1)).upper()
-    ano = m.group(2)
-    abrev = MESES_PT_PARA_ABREV.get(mes, mes[:3])
-    return f"{abrev}/{ano}"
+
+    txt_original = normalize_text(valor).strip()
+    if not txt_original:
+        return None
+
+    txt = _remover_acentos_sim(txt_original).upper()
+    txt = re.sub(r"\s+", " ", txt)
+
+    # Formato numérico de mês/ano: 08/2026, 8/2026, 08-2026.
+    m_num = re.search(r"(?<!\d)(0?[1-9]|1[0-2])\s*[/-]\s*(20\d{2})(?!\d)", txt)
+    if m_num:
+        mes_num = f"{int(m_num.group(1)):02d}"
+        ano = m_num.group(2)
+        return f"{ano}-{mes_num}"
+
+    # Formatos textuais: AGO/2026, AGOSTO/2026, AGOSTO DE 2026, AGO 2026.
+    m_txt = re.search(r"\b([A-Z]{3,12})\b\s*(?:/|-|DE)?\s*(20\d{2})", txt)
+    if m_txt:
+        mes_txt = m_txt.group(1)
+        ano = m_txt.group(2)
+        mes_num = MESES_PT_PARA_NUM.get(mes_txt)
+        if mes_num:
+            return f"{ano}-{mes_num}"
+
+    # Fallback mais tolerante: acha o ano e qualquer nome/abreviação de mês no texto.
+    ano_match = re.search(r"20\d{2}", txt)
+    if ano_match:
+        ano = ano_match.group(0)
+        for nome_mes in sorted(MESES_PT_PARA_NUM.keys(), key=len, reverse=True):
+            if re.search(rf"\b{re.escape(nome_mes)}\b", txt):
+                return f"{ano}-{MESES_PT_PARA_NUM[nome_mes]}"
+
+    return txt
 
 
 def normalizar_unidade_consumidora(valor: str | None):

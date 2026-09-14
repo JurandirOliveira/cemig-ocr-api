@@ -1,3 +1,12 @@
+# Changelog
+
+## 1.0.0-RC13.1 - Normalização de mês GD/SIM
+
+- Ajuste pontual na comparação entre a referência da conta CEMIG comum e a referência da fatura CEMIG SIM.
+- Agora formatos equivalentes como `AGO/2026`, `Agosto/2026`, `AGOSTO DE 2026` e `08/2026` são normalizados internamente para `2026-08`.
+- Os valores originais extraídos continuam sendo gravados nos campos do Survey123; a normalização é usada apenas para evitar divergência falsa.
+- Mantém todo o comportamento da RC13 para webhook, OCR da conta comum, OCR da fatura CEMIG SIM e atualização da Feature Layer.
+
 # CEMIG OCR API
 
 ## 1.0.0-RC13 - OCR da Fatura CEMIG SIM / GD

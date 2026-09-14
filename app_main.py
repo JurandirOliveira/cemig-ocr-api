@@ -16,9 +16,9 @@ from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Request, Resp
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(
-    title="CEMIG OCR API - Survey123 RC13",
-    version="1.0.0-RC13",
-    description="CEMIG OCR API RC13: OCR CEMIG SIM / GD no webhook Survey123.",
+    title="CEMIG OCR API - Survey123 RC13.1",
+    version="1.0.0-RC13.1.1",
+    description="CEMIG OCR API RC13.1: OCR CEMIG SIM / GD no webhook Survey123.",
 )
 
 app.add_middleware(
@@ -60,8 +60,8 @@ def erro_payload(etapa: str, exc: Exception, inicio: float):
 def raiz():
     return {
         "status": "ok",
-        "versao": "1.0.0-RC13",
-        "mensagem": "FastAPI iniciou sem carregar Paddle/PaddleOCR. RC13 com OCR CEMIG SIM / GD.",
+        "versao": "1.0.0-RC13.1.1",
+        "mensagem": "FastAPI iniciou sem carregar Paddle/PaddleOCR. RC13.1 com OCR CEMIG SIM / GD.",
     }
 
 
@@ -69,7 +69,7 @@ def raiz():
 def health():
     return {
         "status": "ok",
-        "versao": "1.0.0-RC13",
+        "versao": "1.0.0-RC13.1.1",
         "ocr_fast_carregado": OCR_FAST is not None,
         "ocr_robusto_carregado": OCR_ROBUSTO is not None,
         "ambiente": ambiente(),
@@ -131,7 +131,7 @@ async def ocr_conta_cemig(arquivo: UploadFile = File(...)):
 
         return {
             "sucesso": True,
-            "versao": "1.0.0-RC13",
+            "versao": "1.0.0-RC13.1.1",
             "arquivo": nome,
             "roteamento": roteamento,
             "resultado": resultado,
@@ -197,7 +197,7 @@ async def ocr_fatura_cemig_sim(arquivo: UploadFile = File(...)):
 
         return {
             "sucesso": True,
-            "versao": "1.0.0-RC13",
+            "versao": "1.0.0-RC13.1.1",
             "arquivo": nome,
             "roteamento": roteamento,
             "resultado": resultado,
@@ -745,7 +745,7 @@ def _selecionar_anexos_gd_survey123(anexos):
     """Seleciona anexo principal e anexo SIM sem processar a SIM ainda.
 
     A conta principal continua sendo processada como antes. A fatura SIM é apenas
-    localizada e registrada em log nesta RC13, para confirmar o formato do payload.
+    localizada e registrada em log nesta RC13.1, para confirmar o formato do payload.
     """
     anexos = [a for a in (anexos or []) if isinstance(a, dict)]
     campos_principal = {
@@ -811,7 +811,7 @@ def _baixar_anexo_survey123(anexo: dict, token: str | None) -> Path:
     os.close(fd)
     caminho = Path(nome_tmp)
 
-    req = urllib.request.Request(url_download, headers={"User-Agent": "cemig-ocr-api/1.0.0-RC13"})
+    req = urllib.request.Request(url_download, headers={"User-Agent": "cemig-ocr-api/1.0.0-RC13.1.1"})
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
             dados = resp.read(MAX_UPLOAD_BYTES + 1)
@@ -834,7 +834,7 @@ def _baixar_anexo_survey123(anexo: dict, token: str | None) -> Path:
 def _arcgis_request_json(url: str, params: dict | None = None, timeout: int = 60):
     query = urllib.parse.urlencode(params or {})
     url_final = url + (("&" if "?" in url else "?") + query if query else "")
-    req = urllib.request.Request(url_final, headers={"User-Agent": "cemig-ocr-api/1.0.0-RC13"})
+    req = urllib.request.Request(url_final, headers={"User-Agent": "cemig-ocr-api/1.0.0-RC13.1.1"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             texto = resp.read().decode("utf-8", errors="replace")
@@ -856,7 +856,7 @@ def _arcgis_post_form_json(url: str, data: dict, timeout: int = 90):
         url,
         data=encoded,
         headers={
-            "User-Agent": "cemig-ocr-api/1.0.0-RC13",
+            "User-Agent": "cemig-ocr-api/1.0.0-RC13.1.1",
             "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
         },
         method="POST",
@@ -1069,7 +1069,7 @@ def _mapear_resultado_para_feature(resultado: dict, roteamento: dict, tempos: di
         "valor_validado": resultado.get("valorValidado"),
         "motor": roteamento.get("motor_escolhido") or roteamento.get("motor"),
         "tempo_processamento": tempos.get("total_s"),
-        "versao_api": "1.0.0-RC13",
+        "versao_api": "1.0.0-RC13.1.1",
         "status": "Processado",
         "gd_detectado_api": _sim_nao_texto(gd_contexto.get("gd_detectado_api")),
         "observacao_processamento": gd_contexto.get("observacao_processamento"),
@@ -1149,7 +1149,7 @@ async def webhook_survey123_options():
 def _processar_survey123_em_background(payload: dict, meta: dict | None = None):
     """Executa o fluxo pesado após responder rapidamente ao Survey123.
 
-    RC13: processa a conta CEMIG principal e, quando existir, a segunda fatura
+    RC13.1: processa a conta CEMIG principal e, quando existir, a segunda fatura
     CEMIG SIM do fluxo de Geração Distribuída, atualizando o mesmo registro.
     """
     inicio = time.perf_counter()
@@ -1170,19 +1170,19 @@ def _processar_survey123_em_background(payload: dict, meta: dict | None = None):
         resumo_anexos = _resumir_anexos_survey123(anexos)
 
         print(
-            f"[SURVEY123 RC13] início objectId={object_id} globalId={global_id} "
+            f"[SURVEY123 RC13.1] início objectId={object_id} globalId={global_id} "
             f"layerId={layer_id} eh_gd_raw={eh_gd_raw!r} eh_gd={eh_gd} "
             f"anexos={len(anexos)} bytes={meta.get('body_bytes')}",
             flush=True,
         )
         print(
-            f"[SURVEY123 RC13] anexos_payload objectId={object_id} "
+            f"[SURVEY123 RC13.1] anexos_payload objectId={object_id} "
             f"resumo={json.dumps(resumo_anexos, ensure_ascii=False)}",
             flush=True,
         )
 
         if not anexos:
-            print(f"[SURVEY123 RC13] erro objectId={object_id}: nenhum anexo encontrado", flush=True)
+            print(f"[SURVEY123 RC13.1] erro objectId={object_id}: nenhum anexo encontrado", flush=True)
             return
 
         selecao_anexos = _selecionar_anexos_gd_survey123(anexos)
@@ -1190,7 +1190,7 @@ def _processar_survey123_em_background(payload: dict, meta: dict | None = None):
         anexo_sim = selecao_anexos.get("sim")
 
         print(
-            f"[SURVEY123 RC13] selecao_anexos objectId={object_id} "
+            f"[SURVEY123 RC13.1] selecao_anexos objectId={object_id} "
             f"principal_campo={selecao_anexos.get('principal_campo')} "
             f"principal_nome={anexo.get('name') if anexo else None} "
             f"sim_encontrada={bool(anexo_sim)} "
@@ -1200,18 +1200,18 @@ def _processar_survey123_em_background(payload: dict, meta: dict | None = None):
         )
 
         if not anexo:
-            print(f"[SURVEY123 RC13] erro objectId={object_id}: anexo principal não localizado", flush=True)
+            print(f"[SURVEY123 RC13.1] erro objectId={object_id}: anexo principal não localizado", flush=True)
             return
 
         print(
-            f"[SURVEY123 RC13] baixando anexo principal objectId={object_id} "
+            f"[SURVEY123 RC13.1] baixando anexo principal objectId={object_id} "
             f"campo={selecao_anexos.get('principal_campo')} "
             f"nome={anexo.get('name')} tipo={anexo.get('contentType')} tamanho={anexo.get('size')}",
             flush=True,
         )
 
         caminho = _baixar_anexo_survey123(anexo, info.get("portalToken"))
-        print(f"[SURVEY123 RC13] anexo principal baixado objectId={object_id} bytes={caminho.stat().st_size}", flush=True)
+        print(f"[SURVEY123 RC13.1] anexo principal baixado objectId={object_id} bytes={caminho.stat().st_size}", flush=True)
 
         inicio_ocr = time.perf_counter()
         motor, roteamento = _obter_motor_para_documento(caminho)
@@ -1225,13 +1225,13 @@ def _processar_survey123_em_background(payload: dict, meta: dict | None = None):
 
         if anexo_sim:
             print(
-                f"[SURVEY123 RC13] baixando fatura SIM objectId={object_id} "
+                f"[SURVEY123 RC13.1] baixando fatura SIM objectId={object_id} "
                 f"campo={selecao_anexos.get('sim_campo')} "
                 f"nome={anexo_sim.get('name')} tipo={anexo_sim.get('contentType')} tamanho={anexo_sim.get('size')}",
                 flush=True,
             )
             caminho_sim = _baixar_anexo_survey123(anexo_sim, info.get("portalToken"))
-            print(f"[SURVEY123 RC13] fatura SIM baixada objectId={object_id} bytes={caminho_sim.stat().st_size}", flush=True)
+            print(f"[SURVEY123 RC13.1] fatura SIM baixada objectId={object_id} bytes={caminho_sim.stat().st_size}", flush=True)
 
             inicio_sim = time.perf_counter()
             try:
@@ -1242,7 +1242,7 @@ def _processar_survey123_em_background(payload: dict, meta: dict | None = None):
                 resultado_sim, tempos_sim = process_document_sim(caminho_sim, ocr=motor_sim, save_debug=False)
 
             print(
-                f"[SURVEY123 RC13] fatura SIM processada objectId={object_id} "
+                f"[SURVEY123 RC13.1] fatura SIM processada objectId={object_id} "
                 f"razao={resultado_sim.get('razaoSocial') if resultado_sim else None} "
                 f"uc={resultado_sim.get('unidadeConsumidora') if resultado_sim else None} "
                 f"ref={resultado_sim.get('mesReferencia') if resultado_sim else None} "
@@ -1252,7 +1252,7 @@ def _processar_survey123_em_background(payload: dict, meta: dict | None = None):
             )
         elif eh_gd is True:
             print(
-                f"[SURVEY123 RC13] alerta_gd objectId={object_id}: "
+                f"[SURVEY123 RC13.1] alerta_gd objectId={object_id}: "
                 "formulário marcou GD=Sim, mas a fatura CEMIG SIM não foi localizada no payload",
                 flush=True,
             )
@@ -1279,7 +1279,7 @@ def _processar_survey123_em_background(payload: dict, meta: dict | None = None):
         )
 
         print(
-            f"[SURVEY123 RC13] processado objectId={object_id} "
+            f"[SURVEY123 RC13.1] processado objectId={object_id} "
             f"nome={resultado.get('nome')} ref={resultado.get('referencia')} "
             f"valor={resultado.get('valor')} validado={resultado.get('valorValidado')} "
             f"sim_processada={bool(resultado_sim)} "
@@ -1294,7 +1294,7 @@ def _processar_survey123_em_background(payload: dict, meta: dict | None = None):
 
     except Exception as exc:
         print(
-            f"[SURVEY123 RC13] erro objectId={info.get('objectId') if isinstance(info, dict) else None}: "
+            f"[SURVEY123 RC13.1] erro objectId={info.get('objectId') if isinstance(info, dict) else None}: "
             f"{type(exc).__name__}: {exc}",
             flush=True,
         )
@@ -1326,18 +1326,18 @@ async def survey123_webhook(request: Request, background_tasks: BackgroundTasks)
     resumo_anexos = _resumir_anexos_survey123(anexos)
 
     print(
-        f"[SURVEY123 RC13] recebido objectId={info.get('objectId')} "
+        f"[SURVEY123 RC13.1] recebido objectId={info.get('objectId')} "
         f"globalId={info.get('globalId')} layerId={info.get('layerId')} "
         f"eh_gd_raw={eh_gd_raw!r} eh_gd={eh_gd} "
         f"anexos={len(anexos)} body_bytes={len(body)}",
         flush=True,
     )
     print(
-        f"[SURVEY123 RC13] anexos_recebidos objectId={info.get('objectId')} "
+        f"[SURVEY123 RC13.1] anexos_recebidos objectId={info.get('objectId')} "
         f"resumo={json.dumps(resumo_anexos, ensure_ascii=False)}",
         flush=True,
     )
-    _logar_diagnostico_detalhado_anexos("[SURVEY123 RC13 POST]", info.get('objectId'), payload, info)
+    _logar_diagnostico_detalhado_anexos("[SURVEY123 RC13.1 POST]", info.get('objectId'), payload, info)
 
     background_tasks.add_task(
         _processar_survey123_em_background,
@@ -1347,7 +1347,7 @@ async def survey123_webhook(request: Request, background_tasks: BackgroundTasks)
 
     return {
         "status": "accepted",
-        "versao": "1.0.0-RC13",
+        "versao": "1.0.0-RC13.1.1",
         "mensagem": "Webhook recebido. Processamento OCR iniciado em background.",
         "objectId": info.get("objectId"),
         "globalId": info.get("globalId"),

@@ -1278,7 +1278,7 @@ def _is_layout_nf3e_instalacao(lines):
     return (
         "DOCUMENTO AUXILIAR" in joined
         and ("NOTA FISCAL" in joined or "NF3E" in joined or "ENERGIA ELÉTRICA ELETRÔNICA" in joined or "ENERGIA ELETRICA ELETRONICA" in joined)
-        # RC13.2: alguns layouts NF3e/Reimpressão não usam o rótulo
+        # RC13.3: alguns layouts NF3e/Reimpressão não usam o rótulo
         # "Nº da instalação"; trazem apenas "N.º da unidade consumidora".
         and ("INSTALA" in joined or "UNIDADE CONSUMIDORA" in joined)
         and ("VALORES FATURADOS" in joined or "ITENS DA FATURA" in joined)
@@ -1368,6 +1368,73 @@ def _parse_consumo_tecnico_nf3e(lines):
     return None
 
 
+
+# ----------------------------------------------------------------------
+# RC13.3 - Detecção de Geração Distribuída na conta CEMIG principal
+# ----------------------------------------------------------------------
+def _detectar_geracao_distribuida_sinais(texts):
+    """Identifica indícios fortes de Geração Distribuída na conta CEMIG comum.
+
+    A decisão é usada para avisar o Survey123 quando o usuário deixou
+    "Conta possui Geração Distribuída?" como Não, mas a própria conta contém
+    itens/observações típicas de GD.
+    """
+    if not texts:
+        return []
+
+    linhas_norm = []
+    for t in texts:
+        txt = normalize_text(t)
+        if not txt:
+            continue
+        try:
+            txt = _remover_acentos_sim(txt)
+        except Exception:
+            pass
+        linhas_norm.append(txt.upper())
+
+    joined = "\n".join(linhas_norm)
+    sinais = []
+
+    def add(nome, cond):
+        if cond and nome not in sinais:
+            sinais.append(nome)
+
+    # Sinais fortes encontrados nas faturas GD testadas.
+    add("energia_compensada_gd", bool(re.search(r"ENERGIA\s+COMPENSADA\s+GD\b", joined)))
+    add("sistema_compensacao_energia", "SISTEMA DE COMPENSACAO DE ENERGIA" in joined)
+    add("unidade_faz_parte_compensacao", "UNIDADE FAZ PARTE DE SISTEMA DE COMPENSACAO" in joined)
+    add("saldo_atual_geracao", "SALDO ATUAL DE GERACAO" in joined)
+    add("energia_scee", bool(re.search(r"\bENERGIA\s+SCEE\b", joined)))
+    add("geracao_distribuida", "GERACAO DISTRIBUIDA" in joined)
+
+    # Sinal auxiliar: "GD" isolado só conta quando está em contexto de energia,
+    # para evitar falso positivo em textos aleatórios.
+    for linha in linhas_norm:
+        if re.search(r"\bGD\b", linha) and any(tok in linha for tok in ("ENERGIA", "COMPENSADA", "GERACAO", "SCEE")):
+            add("gd_em_contexto_energia", True)
+            break
+
+    return sinais
+
+
+def detectar_geracao_distribuida(texts):
+    sinais = _detectar_geracao_distribuida_sinais(texts)
+    if not sinais:
+        return False
+
+    fortes = {
+        "energia_compensada_gd",
+        "sistema_compensacao_energia",
+        "unidade_faz_parte_compensacao",
+        "geracao_distribuida",
+    }
+    if any(s in fortes for s in sinais):
+        return True
+
+    # Quando aparecem dois sinais auxiliares juntos, também tratamos como GD.
+    return len(sinais) >= 2
+
 def _parse_nf3e_instalacao_from_lines(lines):
     """Extrai campos do layout eletrônico/NF3e da CEMIG.
 
@@ -1423,7 +1490,7 @@ def _parse_nf3e_instalacao_from_lines(lines):
         if cep_idx - 3 >= 0:
             candidate = lines[cep_idx - 3].strip()
             cand_upper = candidate.upper()
-            # RC13.2: nomes de unidades públicas podem conter números
+            # RC13.3: nomes de unidades públicas podem conter números
             # (ex.: "POSTO SAUDE H BICALHO 480"). O filtro antigo rejeitava
             # qualquer dígito e fazia o parser NF3e cair no fluxo legado, que
             # podia capturar o cabeçalho institucional da CEMIG.
@@ -1436,7 +1503,7 @@ def _parse_nf3e_instalacao_from_lines(lines):
                 nome = candidate
 
     # Identificador da unidade.
-    # RC13.2: o layout NF3e/Reimpressão pode apresentar tanto
+    # RC13.3: o layout NF3e/Reimpressão pode apresentar tanto
     # "Nº da instalação" (ex.: 3000009130) quanto "N.º da unidade consumidora"
     # (ex.: 3.432.655.018-24). Quando houver os dois números no mesmo trecho,
     # priorizamos o identificador formatado da unidade consumidora e evitamos
@@ -1527,6 +1594,8 @@ def _parse_nf3e_instalacao_from_lines(lines):
         "valor": valor,
         "consumoKWh": consumo,
         "impostoRetidoIRPJ": irpj,
+        "gdDetectado": detectar_geracao_distribuida(lines),
+        "gdSinais": _detectar_geracao_distribuida_sinais(lines),
         # Layout NF3e não possui linha digitável/código de barras.
         # Pela regra RC11, quando não há código de barras, o valor é validado
         # se o valor do topo e o valor do rodapé forem concordantes.
@@ -2036,14 +2105,14 @@ def extract_pdf_text_layout(input_path: Path):
         texto = "\n".join(page.get_text("text") for page in doc)
         doc.close()
     except Exception as exc:
-        print(f"[PDF TEXT RC13.2] falha ao extrair texto direto: {type(exc).__name__}: {exc}", flush=True)
+        print(f"[PDF TEXT RC13.3] falha ao extrair texto direto: {type(exc).__name__}: {exc}", flush=True)
         return None
 
     lines = [normalize_text(line) for line in texto.splitlines() if normalize_text(line)]
     resultado = _parse_nf3e_instalacao_from_lines(lines)
     if resultado:
         print(
-            f"[PDF TEXT RC13.2] layout NF3e reconhecido nome={resultado.get('nome')} "
+            f"[PDF TEXT RC13.3] layout NF3e reconhecido nome={resultado.get('nome')} "
             f"instalacao={(resultado.get('identificador') or {}).get('valor')} "
             f"ref={resultado.get('referencia')} valor={resultado.get('valor')} "
             f"consumo={resultado.get('consumoKWh')}",
@@ -2118,6 +2187,8 @@ def extract_fields(texts, boxes=None):
         "valor": valor,
         "consumoKWh": find_consumo_kwh(texts, boxes),
         "impostoRetidoIRPJ": find_imposto_retido_irpj(texts, boxes),
+        "gdDetectado": detectar_geracao_distribuida(texts),
+        "gdSinais": _detectar_geracao_distribuida_sinais(texts),
         "valorValidado": valor_validado,
         "linhaDigitavel": linha_digitavel,
         "validacao": {

@@ -1,3 +1,10 @@
+# v1.0.0-RC13.3 - Detecção GD na conta principal
+
+- Adicionada detecção de Geração Distribuída na conta CEMIG comum.
+- A API agora reconhece sinais como `Energia compensada GD`, `Energia SCEE`, `Saldo atual de geração` e `Unidade faz parte de sistema de compensação de energia`.
+- Quando o usuário marcar GD = Não, mas a conta principal indicar GD, a API grava `gd_detectado_api = Sim` e preenche `observacao_processamento` avisando que a fatura CEMIG SIM não foi anexada.
+- Mantidas as correções da RC13.2 para NF3e/Reimpressão e da RC13.1 para normalização de mês.
+
 # Changelog
 
 ## 1.0.0-RC13.2 - Correção NF3e/Reimpressão GD

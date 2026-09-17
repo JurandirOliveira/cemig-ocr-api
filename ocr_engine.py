@@ -755,7 +755,6 @@ def find_name_fallback(texts):
                 candidate = t.strip()
                 if (
                     len(candidate) >= 8
-                    and not re.search(r"\d", candidate)
                     and not looks_like_header_noise(candidate)
                 ):
                     return candidate
@@ -1255,7 +1254,6 @@ def parse_digital_customer(texts, boxes):
         u = t.upper()
         if (
             len(t) >= 5
-            and not re.search(r"\d", t)
             and "CPF" not in u
             and not looks_like_header_noise(t)
         ):
@@ -1280,7 +1278,9 @@ def _is_layout_nf3e_instalacao(lines):
     return (
         "DOCUMENTO AUXILIAR" in joined
         and ("NOTA FISCAL" in joined or "NF3E" in joined or "ENERGIA ELÉTRICA ELETRÔNICA" in joined or "ENERGIA ELETRICA ELETRONICA" in joined)
-        and "INSTALA" in joined
+        # RC13.2: alguns layouts NF3e/Reimpressão não usam o rótulo
+        # "Nº da instalação"; trazem apenas "N.º da unidade consumidora".
+        and ("INSTALA" in joined or "UNIDADE CONSUMIDORA" in joined)
         and ("VALORES FATURADOS" in joined or "ITENS DA FATURA" in joined)
     )
 
@@ -1422,28 +1422,57 @@ def _parse_nf3e_instalacao_from_lines(lines):
                 endereco.update(parsed_addr)
         if cep_idx - 3 >= 0:
             candidate = lines[cep_idx - 3].strip()
-            if candidate and not re.search(r"\d", candidate) and not looks_like_header_noise(candidate):
+            cand_upper = candidate.upper()
+            # RC13.2: nomes de unidades públicas podem conter números
+            # (ex.: "POSTO SAUDE H BICALHO 480"). O filtro antigo rejeitava
+            # qualquer dígito e fazia o parser NF3e cair no fluxo legado, que
+            # podia capturar o cabeçalho institucional da CEMIG.
+            if (
+                candidate
+                and not looks_like_header_noise(candidate)
+                and "CNPJ" not in cand_upper
+                and not re.search(r"\d{5}-\d{3}", candidate)
+            ):
                 nome = candidate
 
-    # Instalação.
+    # Identificador da unidade.
+    # RC13.2: o layout NF3e/Reimpressão pode apresentar tanto
+    # "Nº da instalação" (ex.: 3000009130) quanto "N.º da unidade consumidora"
+    # (ex.: 3.432.655.018-24). Quando houver os dois números no mesmo trecho,
+    # priorizamos o identificador formatado da unidade consumidora e evitamos
+    # confundir com o código de débito automático.
     instalacao = None
+    identificador_tipo = "instalacao"
     for i, line in enumerate(lines):
-        if _linha_tem_token_instalacao(line):
-            janela = " ".join(lines[i:i + 4])
+        u = line.upper()
+        eh_instalacao = _linha_tem_token_instalacao(line)
+        eh_unidade_consumidora = "UNIDADE" in u and "CONSUMID" in u
+        if eh_instalacao or eh_unidade_consumidora:
+            janela = " ".join(lines[i:i + 5])
+            formatados = re.findall(r"\b\d{1,3}(?:\.\d{3}){2,3}-\d{2}\b", janela)
             nums = re.findall(r"(?<!\d)(\d{8,12})(?!\d)", janela)
+            if formatados:
+                instalacao = formatados[-1]
+                identificador_tipo = "unidade_consumidora"
+                break
             if nums:
-                # Evita código de débito automático quando ele aparece antes da instalação.
-                # Quando há dois números, a instalação costuma ser o último ou o que começa com 3000.
                 pref = [n for n in nums if n.startswith("3000")]
                 instalacao = pref[0] if pref else nums[-1]
+                identificador_tipo = "instalacao" if eh_instalacao else "unidade_consumidora"
                 break
     if not instalacao:
         for line in lines:
             if "CÓDIGO DE DÉBITO" in line.upper() or "CODIGO DE DEBITO" in line.upper():
+                formatados = re.findall(r"\b\d{1,3}(?:\.\d{3}){2,3}-\d{2}\b", line)
+                if formatados:
+                    instalacao = formatados[-1]
+                    identificador_tipo = "unidade_consumidora"
+                    break
                 nums = re.findall(r"(?<!\d)(\d{8,12})(?!\d)", line)
                 pref = [n for n in nums if n.startswith("3000")]
                 if pref:
                     instalacao = pref[0]
+                    identificador_tipo = "instalacao"
                     break
 
     # Referência / vencimento / valor.
@@ -1492,7 +1521,7 @@ def _parse_nf3e_instalacao_from_lines(lines):
     return {
         "nome": nome,
         "endereco": endereco,
-        "identificador": {"tipo": "instalacao", "valor": instalacao},
+        "identificador": {"tipo": identificador_tipo, "valor": instalacao},
         "referencia": referencia,
         "vencimento": vencimento,
         "valor": valor,
@@ -2007,14 +2036,14 @@ def extract_pdf_text_layout(input_path: Path):
         texto = "\n".join(page.get_text("text") for page in doc)
         doc.close()
     except Exception as exc:
-        print(f"[PDF TEXT RC10] falha ao extrair texto direto: {type(exc).__name__}: {exc}", flush=True)
+        print(f"[PDF TEXT RC13.2] falha ao extrair texto direto: {type(exc).__name__}: {exc}", flush=True)
         return None
 
     lines = [normalize_text(line) for line in texto.splitlines() if normalize_text(line)]
     resultado = _parse_nf3e_instalacao_from_lines(lines)
     if resultado:
         print(
-            f"[PDF TEXT RC10] layout NF3e reconhecido nome={resultado.get('nome')} "
+            f"[PDF TEXT RC13.2] layout NF3e reconhecido nome={resultado.get('nome')} "
             f"instalacao={(resultado.get('identificador') or {}).get('valor')} "
             f"ref={resultado.get('referencia')} valor={resultado.get('valor')} "
             f"consumo={resultado.get('consumoKWh')}",

@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.0-RC13.2 - Correção NF3e/Reimpressão GD
+
+- Corrige a extração de nome e endereço no layout CEMIG comum NF3e/Reimpressão quando o nome do cliente contém números, como "POSTO SAUDE H BICALHO 480".
+- O parser NF3e agora reconhece também documentos com o rótulo "N.º da unidade consumidora", além de "Nº da instalação".
+- Prioriza o bloco do consumidor e ignora o cabeçalho institucional da CEMIG para evitar capturar "REIMPRESSÃO" ou "AV. BARBACENA" como dados do cliente.
+- Mantém intacta a lógica GD/SIM da RC13.1: segundo anexo `fatura_cemig_sim`, parser CEMIG SIM, comparação de unidade e normalização do mês de referência.
+
 ## 1.0.0-RC13.1 - Normalização de mês GD/SIM
 
 - Ajuste pontual na comparação entre a referência da conta CEMIG comum e a referência da fatura CEMIG SIM.

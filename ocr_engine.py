@@ -1280,8 +1280,16 @@ def _is_layout_nf3e_instalacao(lines):
         and ("NOTA FISCAL" in joined or "NF3E" in joined or "ENERGIA ELÉTRICA ELETRÔNICA" in joined or "ENERGIA ELETRICA ELETRONICA" in joined)
         # RC13.3: alguns layouts NF3e/Reimpressão não usam o rótulo
         # "Nº da instalação"; trazem apenas "N.º da unidade consumidora".
-        and ("INSTALA" in joined or "UNIDADE CONSUMIDORA" in joined)
-        and ("VALORES FATURADOS" in joined or "ITENS DA FATURA" in joined)
+        and (
+            ("INSTALA" in joined or "UNIDADE CONSUMIDORA" in joined)
+            and ("VALORES FATURADOS" in joined or "ITENS DA FATURA" in joined)
+            or (
+                # Reimpressão: rótulos estão na imagem de fundo do PDF.
+                re.search(r"\b\d{1,3}(?:\.\d{3}){1,3}-\d{2}\b", joined)
+                and re.search(r"ENERGIA\s+KWH\s+[A-Z]+\d+", joined)
+                and re.search(r"\b[A-Z]{3}/20\d{2}\s+\d{2}/\d{2}/20\d{2}", joined)
+            )
+        )
     )
 
 
@@ -1516,7 +1524,7 @@ def _parse_nf3e_instalacao_from_lines(lines):
         eh_unidade_consumidora = "UNIDADE" in u and "CONSUMID" in u
         if eh_instalacao or eh_unidade_consumidora:
             janela = " ".join(lines[i:i + 5])
-            formatados = re.findall(r"\b\d{1,3}(?:\.\d{3}){2,3}-\d{2}\b", janela)
+            formatados = re.findall(r"\b\d{1,3}(?:\.\d{3}){1,3}-\d{2}\b", janela)
             nums = re.findall(r"(?<!\d)(\d{8,12})(?!\d)", janela)
             if formatados:
                 instalacao = formatados[-1]
@@ -1530,7 +1538,7 @@ def _parse_nf3e_instalacao_from_lines(lines):
     if not instalacao:
         for line in lines:
             if "CÓDIGO DE DÉBITO" in line.upper() or "CODIGO DE DEBITO" in line.upper():
-                formatados = re.findall(r"\b\d{1,3}(?:\.\d{3}){2,3}-\d{2}\b", line)
+                formatados = re.findall(r"\b\d{1,3}(?:\.\d{3}){1,3}-\d{2}\b", line)
                 if formatados:
                     instalacao = formatados[-1]
                     identificador_tipo = "unidade_consumidora"
@@ -1541,6 +1549,13 @@ def _parse_nf3e_instalacao_from_lines(lines):
                     instalacao = pref[0]
                     identificador_tipo = "instalacao"
                     break
+
+    if not instalacao:
+        # Nunca usar conta contrato, número de medidor ou chave NF3e como UC.
+        unidades = set(re.findall(r"\b\d{1,3}(?:\.\d{3}){1,3}-\d{2}\b", "\n".join(lines)))
+        if len(unidades) == 1:
+            instalacao = next(iter(unidades))
+            identificador_tipo = "unidade_consumidora"
 
     # Referência / vencimento / valor.
     referencia = None
@@ -1569,16 +1584,33 @@ def _parse_nf3e_instalacao_from_lines(lines):
         if parsed:
             valor = parsed["value"]
 
-    # IRPJ somente quando há rótulo explícito.
+    # IRPJ: valor da própria linha, sem invadir TOTAL ou outras rubricas.
     irpj = None
     for i, line in enumerate(lines):
         if "IRPJ" in line.upper() and "IMPOST" in line.upper():
-            janela = " ".join(lines[i:min(len(lines), i + 4)])
-            valores = extract_money_tokens(janela)
+            valores = extract_money_tokens(re.split("IRPJ", line, maxsplit=1, flags=re.IGNORECASE)[-1])
+            if not valores and i + 1 < len(lines):
+                seguinte = lines[i + 1]
+                if re.fullmatch(r"(?:R\$\s*)?-?\d[\d.]*,\d{2}-?", seguinte):
+                    valores = extract_money_tokens(seguinte)
             if valores:
-                negativos = [v for v in valores if v < 0]
-                irpj = negativos[0] if negativos else -abs(valores[-1])
-                break
+                irpj = -abs(valores[0])
+            break
+
+    # Confirmação independente do rodapé: data seguida de R$ no final.
+    valor_rodape = None
+    for line in reversed(lines[-15:]):
+        m = re.search(r"\b\d{2}/\d{2}/\d{4}\s+R\$\s*(-?\d[\d.]*,\d{2})", line)
+        if m:
+            parsed = parse_money(m.group(1))
+            valor_rodape = parsed["value"] if parsed else None
+            break
+    if valor_rodape is None:
+        for i in range(max(0, len(lines) - 15), len(lines) - 1):
+            if re.fullmatch(r"\d{2}/\d{2}/\d{4}", lines[i]):
+                if re.fullmatch(r"R\$\s*\d[\d.]*,\d{2}", lines[i + 1]):
+                    valor_rodape = parse_money(lines[i + 1])["value"]
+    concordante = valor is not None and valor_rodape is not None and abs(valor - valor_rodape) < 0.005
 
     consumo = _parse_consumo_tecnico_nf3e(lines)
 
@@ -1599,12 +1631,12 @@ def _parse_nf3e_instalacao_from_lines(lines):
         # Layout NF3e não possui linha digitável/código de barras.
         # Pela regra RC11, quando não há código de barras, o valor é validado
         # se o valor do topo e o valor do rodapé forem concordantes.
-        "valorValidado": True,
+        "valorValidado": concordante,
         "linhaDigitavel": None,
         "validacao": {
             "ocr_topo": valor,
-            "ocr_rodape": valor,
-            "ocr_concordante": True,
+            "ocr_rodape": valor_rodape,
+            "ocr_concordante": concordante,
             "codigo_barras": None,
             "codigo_barras_valido": False,
             "valor_confere_codigo_barras": False,
@@ -2101,18 +2133,21 @@ def extract_pdf_text_layout(input_path: Path):
     if Path(input_path).suffix.lower() != ".pdf":
         return None
     try:
-        doc = fitz.open(str(input_path))
-        texto = "\n".join(page.get_text("text") for page in doc)
-        doc.close()
+        with fitz.open(str(input_path)) as doc:
+            if len(doc) != 1:
+                raise ValueError("Envie um PDF de uma única conta/página; desmembre o compilado antes do OCR.")
+            texto = doc[0].get_text("text")
+    except ValueError:
+        raise
     except Exception as exc:
-        print(f"[PDF TEXT RC13.3] falha ao extrair texto direto: {type(exc).__name__}: {exc}", flush=True)
+        print(f"[PDF TEXT RC13.4] falha ao extrair texto direto: {type(exc).__name__}: {exc}", flush=True)
         return None
 
     lines = [normalize_text(line) for line in texto.splitlines() if normalize_text(line)]
     resultado = _parse_nf3e_instalacao_from_lines(lines)
     if resultado:
         print(
-            f"[PDF TEXT RC13.3] layout NF3e reconhecido nome={resultado.get('nome')} "
+            f"[PDF TEXT RC13.4] layout NF3e reconhecido nome={resultado.get('nome')} "
             f"instalacao={(resultado.get('identificador') or {}).get('valor')} "
             f"ref={resultado.get('referencia')} valor={resultado.get('valor')} "
             f"consumo={resultado.get('consumoKWh')}",
@@ -3030,3 +3065,4 @@ def process_document(input_path: Path, ocr, save_debug: bool = False):
                 temp_ocr_path.unlink(missing_ok=True)
             except Exception:
                 pass
+

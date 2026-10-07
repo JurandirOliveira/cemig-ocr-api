@@ -1,3 +1,15 @@
+## 1.0.0-RC13.4 — NF3e/Reimpressão digital
+
+- Reconhece reimpressão NF3e cujos rótulos estão na imagem de fundo, usando os sinais textuais da própria conta.
+- Extrai UC formatada única (incluindo números curtos), sem confundir com conta contrato ou medidor.
+- Usa texto digital antes de inicializar PaddleOCR no roteador da conta principal.
+- IRPJ é extraído apenas da própria rubrica; não invade a linha TOTAL.
+- Validação compara valores extraídos independentemente de topo e rodapé; ausência ou divergência não valida.
+- PDF com múltiplas páginas é rejeitado com 422 na rota principal para impedir mistura de contas.
+- Seis testes de parser e validação adicionados, sem baixar modelos neurais ou publicar contas reais.
+- Verificação local: PDF reportado retorna UC 3.477.274.018-46, JUN/2026, 22/07/2026, consumo 709 kWh, valor 210,59 e IRPJ -2,56. Corpus: 319 páginas deste layout reconhecidas entre 338 páginas; isso não significa suporte a todas as páginas do compilado.
+- Não houve treinamento de pesos nem validação de inferência PaddleOCR/fotos ou do webhook ArcGIS em produção nesta alteração.
+
 # v1.0.0-RC13.3 - Detecção GD na conta principal
 
 - Adicionada detecção de Geração Distribuída na conta CEMIG comum.
@@ -65,3 +77,4 @@
 
 - Adicionado suporte ao layout eletrônico/NF3e da CEMIG por extração direta de texto em PDF.
 - Captura de nome, endereço, instalação, referência, vencimento, valor, IRPJ e consumo kWh nesse layout.
+
